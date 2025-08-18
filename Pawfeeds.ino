@@ -1,26 +1,18 @@
-/*********************************************************************************
- * PAWFEEDS: An Automated IoT Dog Food Dispenser
- * * FULLY INTEGRATED FIRMWARE (v3.9 - Invalid Time Error Only)
- * * Senior Embedded Developer: Gemini
- * * Project: PAWFEEDS
- * * Date: 2025-08-02
- *********************************************************************************/
-
-// SECTION: Servo Configuration
+// Servo motor positions
 const int SERVO_OPEN_POS = 90;
 const int SERVO_CLOSED_POS = 0;
 const int servoSweepInterval = 400;
 
-// SECTION: Blynk and Network Configuration
+// Blynk and WiFi Details
 #define BLYNK_PRINT Serial
 #define BLYNK_TEMPLATE_ID "TMPL6KOp7_kx1"
 #define BLYNK_TEMPLATE_NAME "Pawfeed"
 #define BLYNK_AUTH_TOKEN "c0Fhyx-3OF7jwFALcORPpGhp5QIuRaE_"
 
-const char* ssid = "PLDTHOMEFIBR27TQu";
-const char* password = "mik@ixy2025";
+const char* ssid = "";
+const char* password = "";
 
-// SECTION: Libraries
+// Libraries
 #include <WiFi.h>
 #include <BlynkSimpleEsp32.h>
 #include <ESP32Servo.h>
@@ -31,7 +23,7 @@ const char* password = "mik@ixy2025";
 #include "img_converters.h"
 #include "Arduino.h"
 
-// SECTION: Pin Definitions
+// ESP32-CAM Pinout
 const int SERVO_PIN = 13;
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
@@ -50,7 +42,7 @@ const int SERVO_PIN = 13;
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
 
-// SECTION: Blynk Virtual Pin Definitions
+// Blynk Virtual Pins
 #define V_BREAKFAST_SCHEDULE V1
 #define V_LUNCH_SCHEDULE     V2
 #define V_DINNER_SCHEDULE    V3
@@ -60,9 +52,9 @@ const int SERVO_PIN = 13;
 #define V_INPUT_KCAL         V7
 #define V_DISPLAY_PORTION    V8
 #define V_EDITABLE_PORTION   V9
-#define V_STATUS_TEXT        V10 // Virtual pin for the error message widget
+#define V_STATUS_TEXT        V10 // for error messages
 
-// SECTION: Global Objects and Variables
+// Global variables
 Servo foodServo;
 WidgetRTC rtc;
 BlynkTimer timer;
@@ -77,15 +69,12 @@ unsigned long dispenseDuration = 0;
 unsigned long lastServoSweepTime = 0;
 bool servoIsAtOpenPosition = false;
 
-// Variables for clearing the error message
+// for clearing the error message
 bool statusMessageIsActive = false;
 unsigned long statusMessageClearTime = 0;
 
-// =================================================================
-// PRIMARY FUNCTIONS
-// =================================================================
 
-// Function to automatically clear the status message after a few seconds
+// Clears the status message after a few seconds
 void handleStatusMessage() {
   if (statusMessageIsActive && millis() > statusMessageClearTime) {
     Blynk.virtualWrite(V_STATUS_TEXT, " "); // Clear the text
@@ -93,21 +82,20 @@ void handleStatusMessage() {
   }
 }
 
-// Helper function to validate and set a meal schedule
+// Checks if the schedule time is valid
 void validateAndSetSchedule(long new_time_secs, long& current_meal_time, const char* meal_name, int min_hour, int max_hour, int v_pin) {
   int hour_of_day = new_time_secs / 3600;
 
   if (hour_of_day >= min_hour && hour_of_day <= max_hour) {
-    // Time is valid, do nothing to the status widget
     current_meal_time = new_time_secs;
   } else {
-    // Time is invalid, display an error on the status widget
+    // Time is invalid, show an error
     String error_msg = String("Invalid time for ") + meal_name;
     Blynk.virtualWrite(V_STATUS_TEXT, error_msg);
     statusMessageIsActive = true;
     statusMessageClearTime = millis() + 5000; // Clear after 5 seconds
     
-    // Revert the widget in the app to the last known valid time
+    // Revert the widget in the app to the last valid time
     if (current_meal_time != -1) {
       Blynk.virtualWrite(v_pin, current_meal_time);
     }
@@ -145,16 +133,29 @@ void handleDispensing() {
 }
 
 void checkSchedules() {
-  if (year() == 1970) return;
+  if (year() == 1970) return; // check if time is synced
   long now = (hour() * 3600) + (minute() * 60) + second();
   if ((now == breakfast_time || now == lunch_time || now == dinner_time) && !isDispensingProcessActive) {
     dispenseFood();
   }
 }
 
-// =================================================================
-// BLYNK HANDLERS
-// =================================================================
+void calculateAndSetPortion() {
+  if (dog_weight_kg <= 0 || food_kcal_per_100g <= 0) return;
+  float rer = 70.0 * pow(dog_weight_kg, 0.75);
+  float life_stage_factor = 1.6; // Default for adult dogs
+  if (dog_age_months <= 4) life_stage_factor = 3.0;
+  else if (dog_age_months <= 12) life_stage_factor = 2.0;
+  float der = rer * life_stage_factor;
+  float food_kcal_per_gram = food_kcal_per_100g / 100.0;
+  float daily_grams = der / food_kcal_per_gram;
+  int grams_per_meal = round(daily_grams / 3.0);
+  Blynk.virtualWrite(V_DISPLAY_PORTION, grams_per_meal);
+  Blynk.virtualWrite(V_EDITABLE_PORTION, grams_per_meal);
+  final_portion_grams = grams_per_meal;
+}
+
+// BLYNK FUNCTIONS
 
 BLYNK_CONNECTED() {
   rtc.begin();
@@ -204,24 +205,9 @@ BLYNK_WRITE(V_EDITABLE_PORTION) {
   final_portion_grams = param.asInt();
 }
 
-void calculateAndSetPortion() {
-  if (dog_weight_kg <= 0 || food_kcal_per_100g <= 0) return;
-  float rer = 70.0 * pow(dog_weight_kg, 0.75);
-  float life_stage_factor = 1.6;
-  if (dog_age_months <= 4) life_stage_factor = 3.0;
-  else if (dog_age_months <= 12) life_stage_factor = 2.0;
-  float der = rer * life_stage_factor;
-  float food_kcal_per_gram = food_kcal_per_100g / 100.0;
-  float daily_grams = der / food_kcal_per_gram;
-  int grams_per_meal = round(daily_grams / 3.0);
-  Blynk.virtualWrite(V_DISPLAY_PORTION, grams_per_meal);
-  Blynk.virtualWrite(V_EDITABLE_PORTION, grams_per_meal);
-  final_portion_grams = grams_per_meal;
-}
 
-// =================================================================
-// CAMERA SERVER
-// =================================================================
+// CAMERA SERVER CODE
+
 esp_err_t stream_handler(httpd_req_t *req){
   camera_fb_t * fb = NULL; esp_err_t res = ESP_OK; size_t _jpg_buf_len = 0; uint8_t * _jpg_buf = NULL; char * part_buf[64];
   res = httpd_resp_set_type(req, "multipart/x-mixed-replace;boundary=--FRAME");
@@ -251,25 +237,33 @@ void startCameraServer(){
   if (httpd_start(&stream_httpd, &config) == ESP_OK) { httpd_register_uri_handler(stream_httpd, &stream_uri); }
 }
 
-// =================================================================
+
 // MAIN SETUP AND LOOP
-// =================================================================
+
 void setup() {
   Serial.begin(115200);
-  Serial.println("PAWFEEDS Integrated Firmware Booting (v3.9)...");
+  Serial.println("Starting PAWFEEDS...");
   foodServo.attach(SERVO_PIN);
   foodServo.write(SERVO_CLOSED_POS);
+  
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0; config.ledc_timer = LEDC_TIMER_0; config.pin_d0 = Y2_GPIO_NUM; config.pin_d1 = Y3_GPIO_NUM; config.pin_d2 = Y4_GPIO_NUM; config.pin_d3 = Y5_GPIO_NUM; config.pin_d4 = Y6_GPIO_NUM; config.pin_d5 = Y7_GPIO_NUM; config.pin_d6 = Y8_GPIO_NUM; config.pin_d7 = Y9_GPIO_NUM; config.pin_xclk = XCLK_GPIO_NUM; config.pin_pclk = PCLK_GPIO_NUM; config.pin_vsync = VSYNC_GPIO_NUM; config.pin_href = HREF_GPIO_NUM; config.pin_sscb_sda = SIOD_GPIO_NUM; config.pin_sscb_scl = SIOC_GPIO_NUM; config.pin_pwdn = PWDN_GPIO_NUM; config.pin_reset = RESET_GPIO_NUM; config.xclk_freq_hz = 20000000; config.pixel_format = PIXFORMAT_JPEG; config.frame_size = FRAMESIZE_SVGA; config.jpeg_quality = 25; config.fb_count = 1;
+  
   esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) { Serial.printf("Camera init failed with error 0x%x", err); return; }
+  if (err != ESP_OK) { 
+    Serial.printf("Camera init failed with error 0x%x", err); 
+    return; 
+  }
   Serial.println("Camera initialized.");
+  
   Blynk.begin(BLYNK_AUTH_TOKEN, ssid, password);
   Serial.println("Connecting to Wi-Fi and Blynk...");
+  
   timer.setInterval(1000L, checkSchedules);
   startCameraServer();
-  Serial.println("Blynk timer and Camera server started.");
-  Serial.print("Local Camera Stream URL: http://");
+  
+  Serial.println("System Ready.");
+  Serial.print("Camera Stream: http://");
   Serial.print(WiFi.localIP());
   Serial.println("/stream");
 }
