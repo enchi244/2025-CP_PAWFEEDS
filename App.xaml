@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 ﻿<?xml version="1.0" encoding="UTF-8" ?>
 <Application xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
@@ -24,4 +25,32 @@
 
         </ResourceDictionary>
     </Application.Resources>
+=======
+﻿<?xml version="1.0" encoding="UTF-8" ?>
+<Application xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:converters="clr-namespace:PawfeedsProvisioner"
+             x:Class="PawfeedsProvisioner.App">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Resources/Styles/Colors.xaml" />
+                <ResourceDictionary Source="Resources/Styles/Styles.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+
+            <converters:BoolToColorConverter x:Key="BoolToColorConverter" 
+                                             TrueColor="{StaticResource Primary}" 
+                                             FalseColor="{StaticResource White}" />
+
+            <Style x:Key="DayButton" TargetType="Button">
+                <Setter Property="CornerRadius" Value="12" />
+                <Setter Property="Padding" Value="10,6" />
+                <Setter Property="Margin" Value="4,0" />
+                <Setter Property="TextColor" Value="{StaticResource White}" />
+                <Setter Property="BackgroundColor" Value="{StaticResource PrimaryDark}" />
+            </Style>
+
+        </ResourceDictionary>
+    </Application.Resources>
+>>>>>>> c44f57a (Initial commit without bin and obj)
 </Application>

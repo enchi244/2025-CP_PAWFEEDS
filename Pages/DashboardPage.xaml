@@ -1,0 +1,198 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:models="clr-namespace:PawfeedsProvisioner.Models"
+             x:Class="PawfeedsProvisioner.Pages.DashboardPage"
+             x:Name="this"
+             Title="Pawfeed Dashboard">
+
+    <ContentPage.ToolbarItems>
+        <ToolbarItem IconImageSource="dotnet_bot.png" Text="Notifications"/>
+    </ContentPage.ToolbarItems>
+
+    <Grid RowDefinitions="*,Auto">
+        <ScrollView Grid.Row="0">
+            <VerticalStackLayout Spacing="12" Padding="16" BindingContext="{x:Reference this}">
+
+                <!-- Profile Management -->
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                    <VerticalStackLayout Grid.Column="0">
+                        <Label Text="Current Profile" Style="{StaticResource CardTitle}"/>
+                        <Picker x:Name="ProfilePicker" 
+                                ItemsSource="{Binding CurrentFeeder.Profiles}"
+                                SelectedItem="{Binding CurrentProfile}"
+                                ItemDisplayBinding="{Binding Name}"/>
+                    </VerticalStackLayout>
+                    <VerticalStackLayout Grid.Column="1" VerticalOptions="End" Spacing="4">
+                        <Button Text="Add Profile" Clicked="OnAddProfileClicked" Padding="10,5" FontSize="12" MinimumHeightRequest="30" />
+                        <Button Text="Rename Profile" Clicked="OnRenameProfileClicked" Padding="10,5" FontSize="12" MinimumHeightRequest="30" BackgroundColor="{StaticResource Gray500}" />
+                    </VerticalStackLayout>
+                </Grid>
+                
+                <!-- Pet Profile Details -->
+                <VerticalStackLayout Spacing="12" BindingContext="{Binding CurrentProfile}">
+                    <Grid ColumnDefinitions="*,*,*" ColumnSpacing="12">
+                        <Frame Grid.Column="0" Style="{StaticResource InfoCard}">
+                            <VerticalStackLayout>
+                                <Label Text="INPUT AGE (Months)" Style="{StaticResource CardTitle}"/>
+                                <Entry Text="{Binding AgeMonths}" Keyboard="Numeric" HorizontalTextAlignment="Center" FontSize="20"/>
+                            </VerticalStackLayout>
+                        </Frame>
+                        <Frame Grid.Column="1" Style="{StaticResource InfoCard}">
+                            <VerticalStackLayout>
+                                <Label Text="INPUT WEIGHT (Kg)" Style="{StaticResource CardTitle}"/>
+                                <Entry Text="{Binding WeightKg}" Keyboard="Numeric" HorizontalTextAlignment="Center" FontSize="20"/>
+                            </VerticalStackLayout>
+                        </Frame>
+                        <Frame Grid.Column="2" Style="{StaticResource InfoCard}">
+                            <VerticalStackLayout>
+                                <Label Text="Food kcal/100g" Style="{StaticResource CardTitle}"/>
+                                <Entry Text="{Binding FoodKcalPer100g}" Keyboard="Numeric" HorizontalTextAlignment="Center" FontSize="20"/>
+                            </VerticalStackLayout>
+                        </Frame>
+                    </Grid>
+
+                    <Grid ColumnDefinitions="*,*" ColumnSpacing="12">
+                        <Frame Grid.Column="0" Style="{StaticResource InfoCard}">
+                            <VerticalStackLayout>
+                                <Label Text="Sex/Neuter Status" Style="{StaticResource CardTitle}"/>
+                                <Picker SelectedIndex="{Binding SexStatus}"
+                                        ItemsSource="{Binding Source={x:Reference this}, Path=CurrentProfile.SexStatusOptions}"
+                                        HorizontalTextAlignment="Center" FontSize="16"/>
+                            </VerticalStackLayout>
+                        </Frame>
+                        <Frame Grid.Column="1" Style="{StaticResource InfoCard}">
+                            <VerticalStackLayout>
+                                <Label Text="Activity Level" Style="{StaticResource CardTitle}"/>
+                                <Picker SelectedIndex="{Binding ActivityLevel}"
+                                        ItemsSource="{Binding Source={x:Reference this}, Path=CurrentProfile.ActivityLevelOptions}"
+                                        HorizontalTextAlignment="Center" FontSize="16"/>
+                            </VerticalStackLayout>
+                        </Frame>
+                    </Grid>
+
+                    <Grid ColumnDefinitions="*,*" ColumnSpacing="12">
+                        <Frame Grid.Column="0" Style="{StaticResource InfoCard}">
+                            <VerticalStackLayout>
+                                <Label Text="PORTION PER MEAL" Style="{StaticResource CardTitle}"/>
+                                <Label Text="{Binding DisplayCalculation, StringFormat='{0}g'}" FontSize="24" FontAttributes="Bold" HorizontalTextAlignment="Center"/>
+                                <Label Text="edit portion (grams)" Style="{StaticResource CardTitle}" Margin="0,10,0,0"/>
+                                <Entry Text="{Binding EditedCalculation}" Keyboard="Numeric" HorizontalTextAlignment="Center" FontSize="20"/>
+                            </VerticalStackLayout>
+                        </Frame>
+                        <Frame Grid.Column="1" Style="{StaticResource InfoCard}">
+                            <VerticalStackLayout>
+                                <Label Text="FOOD STORAGE LEVEL" Style="{StaticResource CardTitle}"/>
+                                <Label Text="{Binding Source={x:Reference this}, Path=CurrentFeeder.ContainerWeightDisplay}" 
+                                       FontSize="24" 
+                                       FontAttributes="Bold" 
+                                       HorizontalTextAlignment="Center" 
+                                       VerticalOptions="Center"/>
+                            </VerticalStackLayout>
+                        </Frame>
+                    </Grid>
+                </VerticalStackLayout>
+                
+                <!-- Feed Now Button -->
+                <Button x:Name="FeedNowBtn" Text="FEED NOW" 
+                        Clicked="OnFeedNowClicked" 
+                        IsEnabled="{Binding CurrentFeeder.IsOnline}" 
+                        BackgroundColor="#16a085" 
+                        Margin="0,10,0,0"/>
+
+                <!-- Device Info and Stream -->
+                <Label x:Name="IpAddressLabel" Text="Connecting..." HorizontalOptions="Center" TextColor="{StaticResource Gray500}" FontSize="12" Margin="0,10,0,0"/>
+                <Frame HeightRequest="240" Padding="0" BorderColor="{StaticResource Gray300}" BackgroundColor="Black">
+                    <WebView x:Name="StreamWebView" />
+                </Frame>
+                
+                <!-- Feeding Schedules -->
+                <Grid ColumnDefinitions="*,Auto" Margin="0,20,0,0">
+                    <Label Grid.Column="0" Text="Feeding Schedules" FontSize="18" FontAttributes="Bold" VerticalOptions="Center"/>
+                    <Button Grid.Column="1" Text="+ Add Schedule" Clicked="OnAddScheduleClicked"/>
+                </Grid>
+
+                <Label Text="No schedules added yet." x:Name="NoSchedulesLabel" IsVisible="True" HorizontalTextAlignment="Center" Margin="0,20,0,20"/>
+
+                <VerticalStackLayout x:Name="SchedulesList" BindableLayout.ItemsSource="{Binding Schedules}">
+                    <BindableLayout.ItemTemplate>
+                        <DataTemplate x:DataType="models:FeedingSchedule">
+                            <Frame Padding="12" BorderColor="{StaticResource Gray200}" Margin="0,0,0,8">
+                                <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="12">
+                                    <VerticalStackLayout Grid.Column="0">
+                                        <Label Text="{Binding Name}" FontAttributes="Bold"/>
+                                        <Label Text="{Binding Time, StringFormat='{0:hh\\:mm tt}'}" TextColor="{StaticResource Gray500}"/>
+                                    </VerticalStackLayout>
+                                    <Switch Grid.Column="1" IsToggled="{Binding IsEnabled}" VerticalOptions="Center"/>
+                                    <Button Grid.Column="2" Text="Edit" Clicked="OnEditScheduleClicked" CommandParameter="{Binding .}"/>
+                                </Grid>
+                            </Frame>
+                        </DataTemplate>
+                    </BindableLayout.ItemTemplate>
+                </VerticalStackLayout>
+            </VerticalStackLayout>
+        </ScrollView>
+        
+        <!-- Feeder Switcher (bottom toolbar) -->
+<Border Grid.Row="1" StrokeThickness="0" 
+        BackgroundColor="{AppThemeBinding Light={StaticResource Gray100}, Dark={StaticResource Gray950}}" 
+        Padding="0">
+    <CollectionView ItemsSource="{Binding Feeders}" SelectionMode="None">
+        <CollectionView.ItemsLayout>
+            <GridItemsLayout Orientation="Horizontal" Span="2" />
+        </CollectionView.ItemsLayout>
+        <CollectionView.ItemTemplate>
+            <DataTemplate x:DataType="models:FeederViewModel">
+                <Button Text="{Binding Name}"
+                        Clicked="OnFeederButtonClicked"
+                        HorizontalOptions="Fill"
+                        VerticalOptions="Fill">
+                    <Button.Style>
+                        <Style TargetType="Button">
+                            <Setter Property="BackgroundColor" Value="{AppThemeBinding Light={StaticResource Gray200}, Dark={StaticResource Gray600}}" />
+                            <Setter Property="TextColor" Value="{AppThemeBinding Light={StaticResource Gray900}, Dark={StaticResource White}}" />
+                            <Setter Property="CornerRadius" Value="0"/>
+                            <Setter Property="FontAttributes" Value="Bold"/>
+                            <Style.Triggers>
+                                <DataTrigger TargetType="Button"
+                                             Binding="{Binding IsSelected}"
+                                             Value="True">
+                                    <Setter Property="BackgroundColor" Value="{StaticResource Primary}" />
+                                    <Setter Property="TextColor" Value="{StaticResource White}" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Button.Style>
+                </Button>
+            </DataTemplate>
+        </CollectionView.ItemTemplate>
+    </CollectionView>
+</Border>
+
+
+        <!-- Popup Overlay -->
+        <BoxView Grid.RowSpan="2" x:Name="PopupOverlay" IsVisible="False" BackgroundColor="Black" Opacity="0.6"/>
+
+        <!-- Add/Edit Schedule Popup -->
+        <Border Grid.RowSpan="2" x:Name="AddSchedulePopup" IsVisible="False" 
+                Stroke="{StaticResource Gray300}" StrokeThickness="1"
+                BackgroundColor="{AppThemeBinding Light={StaticResource White}, Dark={StaticResource Gray950}}"
+                Padding="20" Margin="30" VerticalOptions="Center">
+            <VerticalStackLayout Spacing="15">
+                <Label x:Name="PopupTitle" Text="Add New Schedule" FontSize="18" FontAttributes="Bold"/>
+                <Entry x:Name="ScheduleNameEntry" Placeholder="Schedule Name (e.g., Breakfast)"/>
+                <TimePicker x:Name="ScheduleTimePicker"/>
+                
+                <Label Text="Repeat on days:" Margin="0,10,0,0"/>
+                
+                <FlexLayout x:Name="DaysOfWeekLayout" JustifyContent="SpaceBetween"/>
+                <Grid ColumnDefinitions="*,*" ColumnSpacing="12" Margin="0,10,0,0">
+                    <Button Grid.Column="0" Text="Save" Clicked="OnSaveScheduleClicked"/>
+                    <Button Grid.Column="1" Text="Cancel" Clicked="OnCancelScheduleClicked" BackgroundColor="{StaticResource Gray500}"/>
+                </Grid>
+            
+                <Button x:Name="DeleteScheduleButton" Text="Delete Schedule" BackgroundColor="Red" IsVisible="False" Clicked="OnDeleteScheduleClicked"/>
+            </VerticalStackLayout>
+        </Border>
+    </Grid>
+</ContentPage>

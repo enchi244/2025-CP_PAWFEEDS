@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "625170503196",
+    "project_id": "pawfeedscloud",
+    "storage_bucket": "pawfeedscloud.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:625170503196:android:9af259ae8fc521262631d9",
+        "android_client_info": {
+          "package_name": "com.pawfeeds.provisioner"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAPzRRwqBCKUm4chclO5K1FYBgj-np1lEQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

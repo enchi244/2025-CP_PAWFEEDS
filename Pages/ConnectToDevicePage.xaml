@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage
+    x:Class="PawfeedsProvisioner.Pages.ConnectToDevicePage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    Title="Connect to Device">
+  <VerticalStackLayout Padding="24" Spacing="16">
+    <Label Text="Step 1: Join the device hotspot" FontSize="20" FontAttributes="Bold" />
+    <Label Text="Open Wi-Fi settings and connect to PAWFEEDS-XXXX (the device AP). Return to this app after connecting." />
+    <Button Text="Open Wi-Fi Settings" Clicked="OpenWifi" />
+    <Button Text="I’m Connected →" Clicked="Next" />
+  </VerticalStackLayout>
+</ContentPage>

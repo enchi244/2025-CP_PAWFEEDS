@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="PawfeedsProvisioner.Pages.ConfirmationPage"
+             Title="Provisioning Complete">
+
+    <VerticalStackLayout Padding="20" Spacing="16">
+
+        <Label Text="Your device has been successfully provisioned!"
+               FontSize="20"
+               HorizontalOptions="Center"
+               HorizontalTextAlignment="Center"
+               FontAttributes="Bold"
+               Margin="0,20,0,10"/>
+
+        <!-- Summary area populated by code-behind -->
+        <Label x:Name="SummaryLabel"
+               FontSize="16"
+               LineBreakMode="WordWrap"
+               HorizontalOptions="Center"
+               HorizontalTextAlignment="Center"
+               TextColor="{DynamicResource PrimaryTextColor}" />
+
+        <Button Text="Restart"
+                Clicked="Restart"
+                Margin="0,30,0,0"
+                HorizontalOptions="Center"/>
+    </VerticalStackLayout>
+</ContentPage>
