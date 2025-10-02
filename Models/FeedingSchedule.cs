@@ -1,45 +1,63 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Text.Json.Serialization;
 
-namespace PawfeedsProvisioner.Models;
-
-public class FeedingSchedule : INotifyPropertyChanged
+namespace PawfeedsProvisioner.Models
 {
-    private string _name = "New Schedule";
-    public string Name
+    public class FeedingSchedule : INotifyPropertyChanged
     {
-        get => _name;
-        set { _name = value; OnPropertyChanged(); }
-    }
+        private string _name = string.Empty;
+        public string Name
+        {
+            get => _name;
+            set => SetProperty(ref _name, value);
+        }
 
-    private TimeSpan _time = TimeSpan.FromHours(8);
-    public TimeSpan Time
-    {
-        get => _time;
-        set { _time = value; OnPropertyChanged(); }
-    }
+        private TimeSpan _time;
+        public TimeSpan Time
+        {
+            get => _time;
+            set => SetProperty(ref _time, value);
+        }
 
-    private bool _isEnabled = true;
-    public bool IsEnabled
-    {
-        get => _isEnabled;
-        set { _isEnabled = value; OnPropertyChanged(); }
-    }
+        private bool _isEnabled = true;
+        public bool IsEnabled
+        {
+            get => _isEnabled;
+            set => SetProperty(ref _isEnabled, value);
+        }
 
-    private List<DayOfWeek> _days = new List<DayOfWeek> 
-    { 
-        DayOfWeek.Sunday, DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, 
-        DayOfWeek.Thursday, DayOfWeek.Friday, DayOfWeek.Saturday 
-    };
-    public List<DayOfWeek> Days
-    {
-        get => _days;
-        set { _days = value; OnPropertyChanged(); }
-    }
+        private List<DayOfWeek> _days = new();
+        public List<DayOfWeek> Days
+        {
+            get => _days;
+            set => SetProperty(ref _days, value);
+        }
 
-    public event PropertyChangedEventHandler? PropertyChanged;
-    protected void OnPropertyChanged([CallerMemberName] string? propertyName = null)
-    {
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        // --- START MODIFICATION ---
+        private DateTime _lastTriggered;
+        [JsonIgnore] // We don't want to save this to the JSON file, it's for runtime only
+        public DateTime LastTriggered
+        {
+            get => _lastTriggered;
+            set => SetProperty(ref _lastTriggered, value);
+        }
+        // --- END MODIFICATION ---
+
+        public event PropertyChangedEventHandler? PropertyChanged;
+        protected virtual void OnPropertyChanged([CallerMemberName] string? propertyName = null)
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
+
+        protected bool SetProperty<T>(ref T backingStore, T value, [CallerMemberName] string propertyName = "")
+        {
+            if (EqualityComparer<T>.Default.Equals(backingStore, value))
+                return false;
+
+            backingStore = value;
+            OnPropertyChanged(propertyName);
+            return true;
+        }
     }
 }

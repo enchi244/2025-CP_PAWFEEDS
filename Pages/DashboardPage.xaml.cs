@@ -7,7 +7,8 @@ using System.Diagnostics;
 using Microsoft.Maui.Handlers;
 using System.Linq;
 using System;
-using System.Text.Json; // Added for JSON parsing
+using System.Text;
+using System.Text.Json;
 
 namespace PawfeedsProvisioner.Pages;
 
@@ -108,10 +109,8 @@ public partial class DashboardPage : ContentPage
     private FeedingSchedule? _currentlyEditingSchedule;
     private bool _isFeeding = false;
     
-    // --- START MODIFICATION ---
     private Timer? _statusPollingTimer;
     private readonly HttpClient _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-    // --- END MODIFICATION ---
 
     #endregion
 
@@ -122,7 +121,9 @@ public partial class DashboardPage : ContentPage
         _provisioningClient = provisioningClient;
         _cloudFunctionService = cloudFunctionService;
         
-        Feeders = new ObservableCollection<FeederViewModel>(_profileService.LoadFeeders());
+        // This line is updated to fix the compiler error
+        Feeders = new ObservableCollection<FeederViewModel>(_profileService.GetFeeders());
+
         this.BindingContext = this;
         
         DaysOfWeek = new ObservableCollection<DayOfWeekViewModel>
@@ -177,10 +178,7 @@ public partial class DashboardPage : ContentPage
              CurrentFeeder = Feeders.First();
         }
 
-        // --- START MODIFICATION ---
-        // Start the timer to poll for status updates
         _statusPollingTimer = new Timer(PollFeederStatus, null, TimeSpan.Zero, TimeSpan.FromSeconds(5));
-        // --- END MODIFICATION ---
     }
 
     protected override void OnDisappearing()
@@ -192,12 +190,9 @@ public partial class DashboardPage : ContentPage
     #endif
         Debug.WriteLine("[DashboardPage] WebView stream stopped and handler cleaned up.");
 
-        // --- START MODIFICATION ---
-        // Stop the timer when the page disappears
         _statusPollingTimer?.Change(Timeout.Infinite, 0);
         _statusPollingTimer?.Dispose();
         _statusPollingTimer = null;
-        // --- END MODIFICATION ---
     }
 
     #region Event Handlers for Data Changes
@@ -261,12 +256,12 @@ public partial class DashboardPage : ContentPage
         UpdateFeederStatus();
     }
 
-    // --- START MODIFICATION ---
-    // This new method periodically fetches the status and updates the CurrentFeeder's weight
     private async void PollFeederStatus(object? state)
     {
         if (CurrentFeeder == null || string.IsNullOrWhiteSpace(CurrentFeeder.FeederIp) || CurrentFeeder.FeederIp == "N/A")
         {
+            if (CurrentFeeder != null) CurrentFeeder.IsOnline = false;
+            MainThread.BeginInvokeOnMainThread(UpdateFeederStatus);
             return;
         }
 
@@ -282,15 +277,21 @@ public partial class DashboardPage : ContentPage
                 MainThread.BeginInvokeOnMainThread(() =>
                 {
                     CurrentFeeder.ContainerWeight = weight;
+                    CurrentFeeder.IsOnline = true;
+                    UpdateFeederStatus();
                 });
             }
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[DashboardPage] Failed to poll status from {CurrentFeeder.FeederIp}: {ex.Message}");
+            MainThread.BeginInvokeOnMainThread(() =>
+            {
+                if (CurrentFeeder != null) CurrentFeeder.IsOnline = false;
+                UpdateFeederStatus();
+            });
         }
     }
-    // --- END MODIFICATION ---
 
     private void UpdateFeederStatus()
     {
@@ -298,9 +299,12 @@ public partial class DashboardPage : ContentPage
         string feederIp = CurrentFeeder?.FeederIp ?? "N/A";
         IpAddressLabel.Text = $"Camera: {camIp} | Feeder: {feederIp}";
 
-        bool canFeed = !string.IsNullOrWhiteSpace(CurrentFeeder?.DeviceId) && !_isFeeding;
+        bool isOnline = CurrentFeeder?.IsOnline ?? false;
+        bool canFeed = isOnline && !_isFeeding;
+
         FeedNowBtn.IsEnabled = canFeed;
-        FeedNowBtn.Text = "FEED NOW";
+        FeedNowBtn.Text = isOnline ? "FEED NOW" : "Feeder Offline";
+        FeedNowBtn.BackgroundColor = isOnline ? Color.FromArgb("#16a085") : Colors.Gray;
     }
 
     private void UpdateSchedulesVisibility()
@@ -348,9 +352,9 @@ public partial class DashboardPage : ContentPage
     #region Actions (Feed Now)
     private async void OnFeedNowClicked(object sender, EventArgs e)
     {
-        if (_isFeeding || CurrentFeeder == null || CurrentProfile == null || string.IsNullOrWhiteSpace(CurrentFeeder.DeviceId))
+        if (_isFeeding || CurrentFeeder == null || !CurrentFeeder.IsOnline || CurrentProfile == null)
         {
-            await DisplayAlert("Error", "No unique Device ID found for this feeder.", "OK");
+            await DisplayAlert("Error", "Feeder is offline or no profile is selected.", "OK");
             return;
         }
         
@@ -360,10 +364,56 @@ public partial class DashboardPage : ContentPage
             await DisplayAlert("No Portion", "Cannot feed 0 grams. Please add a schedule or edit the portion size.", "OK");
             return;
         }
+        
+        if (string.IsNullOrWhiteSpace(CurrentFeeder.DeviceId))
+        {
+            await FeedLocally(portion);
+            return;
+        }
 
         bool confirm = await DisplayAlert("Confirm Remote Feed", $"Dispense {portion}g from {CurrentFeeder.Name} via the cloud?", "Yes", "Cancel");
         if (!confirm) return;
 
+        await FeedRemotely(portion);
+    }
+    
+    private async Task FeedLocally(int portion)
+    {
+        try
+        {
+            _isFeeding = true;
+            UpdateFeederStatus();
+
+            var url = $"http://{CurrentFeeder.FeederIp}/feed";
+            var payload = new { grams = portion, feeder = CurrentFeeder.Id };
+            var json = JsonSerializer.Serialize(payload);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            var response = await _httpClient.PostAsync(url, content);
+
+            if (response.IsSuccessStatusCode)
+            {
+                await DisplayAlert("Success", "Local feed command sent to the device.", "OK");
+            }
+            else
+            {
+                var error = await response.Content.ReadAsStringAsync();
+                await DisplayAlert("Error", $"Failed to send local command: {error}", "OK");
+            }
+        }
+        catch (Exception ex)
+        {
+            await DisplayAlert("Exception", $"An error occurred during local feed: {ex.Message}", "OK");
+        }
+        finally
+        {
+            _isFeeding = false;
+            UpdateFeederStatus();
+        }
+    }
+    
+    private async Task FeedRemotely(int portion)
+    {
         try
         {
             _isFeeding = true;
@@ -410,7 +460,7 @@ public partial class DashboardPage : ContentPage
         if (Application.Current?.Resources.TryGetValue("BoolToColorConverter", out var converterResource) is not true ||
             converterResource is not BoolToColorConverter converter)
         {
-            return; // Converter not found, cannot proceed
+            return;
         }
 
         foreach (var dayVM in DaysOfWeek)

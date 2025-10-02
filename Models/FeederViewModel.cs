@@ -47,8 +47,16 @@ namespace PawfeedsProvisioner.Models
             get => _isSelected;
             set => SetProperty(ref _isSelected, value);
         }
-
+        
         // --- START MODIFICATION ---
+        private bool _isOnline;
+        public bool IsOnline
+        {
+            get => _isOnline;
+            set => SetProperty(ref _isOnline, value);
+        }
+        // --- END MODIFICATION ---
+
         private double _containerWeight;
         public double ContainerWeight
         {
@@ -57,15 +65,12 @@ namespace PawfeedsProvisioner.Models
             {
                 if (SetProperty(ref _containerWeight, value))
                 {
-                    // This tells the UI to update the display string whenever the weight value changes.
                     OnPropertyChanged(nameof(ContainerWeightDisplay));
                 }
             }
         }
 
-        // This is the property the UI will bind to.
         public string ContainerWeightDisplay => $"{ContainerWeight:F1} g";
-        // --- END MODIFICATION ---
 
         public ObservableCollection<PetProfileViewModel> Profiles { get; set; } = new();
 

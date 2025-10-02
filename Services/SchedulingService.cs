@@ -1,104 +1,157 @@
-using PawfeedsProvisioner.Models;
 using System.Diagnostics;
-using Plugin.LocalNotification;
+using System.Text;
+using System.Text.Json;
+using PawfeedsProvisioner.Models;
 
-namespace PawfeedsProvisioner.Services;
-
-public class SchedulingService
+namespace PawfeedsProvisioner.Services
 {
-    private readonly IServiceProvider _serviceProvider;
-    private IDispatcherTimer? _timer;
-    private TimeSpan _lastCheckedTime;
-
-    public SchedulingService(IServiceProvider serviceProvider)
+    public class SchedulingService
     {
-        _serviceProvider = serviceProvider;
-    }
+        private readonly ProfileService _profileService;
+        private readonly CloudFunctionService _cloudFunctionService;
+        private readonly HttpClient _httpClient;
+        private Timer? _timer;
 
-    public void Start()
-    {
-        if (_timer?.IsRunning == true) return;
-        if (Application.Current == null) return;
-
-        _timer = Application.Current.Dispatcher.CreateTimer();
-        _timer.Interval = TimeSpan.FromSeconds(30);
-        _timer.Tick += OnTimerTick;
-        _timer.Start();
-
-        _lastCheckedTime = DateTime.Now.TimeOfDay;
-        Debug.WriteLine("[SchedulingService] Service started.");
-    }
-
-    private async void OnTimerTick(object? sender, EventArgs e)
-    {
-        var now = DateTime.Now;
-        var currentTime = now.TimeOfDay;
-        var currentDay = now.DayOfWeek;
-
-        using var scope = _serviceProvider.CreateScope();
-        var profileService = scope.ServiceProvider.GetRequiredService<ProfileService>();
-        var provisioningClient = scope.ServiceProvider.GetRequiredService<ProvisioningClient>();
-
-        // --- START FIX: Use LoadFeeders and iterate through the new data structure ---
-        var allFeeders = profileService.LoadFeeders();
-        if (allFeeders == null || !allFeeders.Any()) return;
-
-        var timeToCheckFrom = _lastCheckedTime;
-        _lastCheckedTime = currentTime;
-
-        foreach (var feeder in allFeeders)
+        public SchedulingService(ProfileService profileService, CloudFunctionService cloudFunctionService)
         {
-            if (string.IsNullOrEmpty(feeder.FeederIp) || feeder.FeederIp == "N/A") continue;
+            _profileService = profileService;
+            _cloudFunctionService = cloudFunctionService;
+            _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        }
 
-            foreach (var profile in feeder.Profiles)
+        public void Start()
+        {
+            _timer = new Timer(async _ => await CheckSchedulesAsync(), null, TimeSpan.Zero, TimeSpan.FromSeconds(10));
+            Debug.WriteLine("[SchedulingService] Started");
+        }
+
+        public void Stop()
+        {
+            _timer?.Change(Timeout.Infinite, 0);
+            Debug.WriteLine("[SchedulingService] Stopped");
+        }
+
+        private async Task CheckSchedulesAsync()
+        {
+            try
             {
-                if (profile?.Schedules == null || !profile.Schedules.Any()) continue;
+                var now = DateTime.Now;
+                // This line is updated to fix the compiler error
+                var feeders = _profileService.GetFeeders();
+                var tasksToRun = new List<Task>();
 
-                foreach (var schedule in profile.Schedules)
+                if (feeders == null) return;
+
+                foreach (var feeder in feeders)
                 {
-                    if (!schedule.IsEnabled || !schedule.Days.Contains(currentDay)) continue;
+                    if (feeder.Profiles == null) continue;
 
-                    bool isTimeOccurringNow = IsTimeInInterval(schedule.Time, timeToCheckFrom, currentTime);
-
-                    if (isTimeOccurringNow)
+                    foreach (var profile in feeder.Profiles)
                     {
-                        Debug.WriteLine($"[SchedulingService] Triggering schedule '{schedule.Name}' for profile '{profile.Name}' on '{feeder.Name}'");
+                        if (profile.Schedules == null) continue;
 
-                        int portion = profile.EditedCalculation > 0 ? profile.EditedCalculation : profile.DisplayCalculation;
-
-                        if (portion > 0)
+                        foreach (var schedule in profile.Schedules)
                         {
-                            bool success = await provisioningClient.FeedNowAsync(feeder.FeederIp, portion, feeder.Id);
+                            bool isDue = schedule.IsEnabled &&
+                                         schedule.Days.Contains(now.DayOfWeek) &&
+                                         now.TimeOfDay >= schedule.Time &&
+                                         schedule.LastTriggered.Date < now.Date;
 
-                            if (success)
+                            if (isDue)
                             {
-                                var request = new NotificationRequest
+                                schedule.LastTriggered = now;
+                                Debug.WriteLine($"[SchedulingService] Schedule '{schedule.Name}' for feeder '{feeder.Name}' is due.");
+
+                                int portion = profile.EditedCalculation;
+                                if (portion <= 0)
                                 {
-                                    NotificationId = new Random().Next(1000, 9999),
-                                    Title = $"Pawfeed Dispensed from {feeder.Name}!",
-                                    Subtitle = $"For {profile.Name} - {schedule.Name}",
-                                    Description = $"Just dispensed {portion}g of food.",
-                                    Schedule = new NotificationRequestSchedule { NotifyTime = DateTime.Now.AddSeconds(1) }
-                                };
-                                await LocalNotificationCenter.Current.Show(request);
+                                    Debug.WriteLine($"[SchedulingService] Portion for '{schedule.Name}' is 0, skipping.");
+                                    continue;
+                                }
+                                
+                                tasksToRun.Add(TriggerFeedAsync(feeder, portion, schedule.Name));
                             }
                         }
                     }
                 }
+
+                if (tasksToRun.Any())
+                {
+                    Debug.WriteLine($"[SchedulingService] Executing {tasksToRun.Count} feed tasks concurrently.");
+                    await Task.WhenAll(tasksToRun);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[SchedulingService] Error checking schedules: {ex.Message}");
             }
         }
-        // --- END FIX ---
-    }
+        
+        private async Task TriggerFeedAsync(FeederViewModel feeder, int portion, string scheduleName)
+        {
+            Debug.WriteLine($"[SchedulingService] Triggering feed for {feeder.Name} ({portion}g) from schedule '{scheduleName}'.");
 
-    private bool IsTimeInInterval(TimeSpan timeToTest, TimeSpan start, TimeSpan end)
-    {
-        if (start <= end)
-        {
-            return timeToTest > start && timeToTest <= end;
+            if (!string.IsNullOrWhiteSpace(feeder.FeederIp) && feeder.FeederIp != "N/A")
+            {
+                await FeedLocallyAsync(feeder, portion);
+            }
+            else if (!string.IsNullOrWhiteSpace(feeder.DeviceId))
+            {
+                await FeedRemotelyAsync(feeder, portion);
+            }
+            else
+            {
+                Debug.WriteLine($"[SchedulingService] Feeder '{feeder.Name}' has no IP or DeviceId. Cannot trigger feed.");
+            }
         }
-        else
+
+        private async Task FeedLocallyAsync(FeederViewModel feeder, int portion)
         {
-            return timeToTest > start || timeToTest <= end;
+            try
+            {
+                var url = $"http://{feeder.FeederIp}/feed";
+                var payload = new { grams = portion, feeder = feeder.Id };
+                var json = JsonSerializer.Serialize(payload);
+                var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+                var response = await _httpClient.PostAsync(url, content);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    Debug.WriteLine($"[SchedulingService] Successfully sent local feed command to '{feeder.Name}'.");
+                }
+                else
+                {
+                    var error = await response.Content.ReadAsStringAsync();
+                    Debug.WriteLine($"[SchedulingService] Failed to send local command to '{feeder.Name}': {error}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[SchedulingService] Exception during local feed for '{feeder.Name}': {ex.Message}");
+            }
+        }
+
+        private async Task FeedRemotelyAsync(FeederViewModel feeder, int portion)
+        {
+            try
+            {
+                var commandPayload = new { type = "FEED", portion };
+                var result = await _cloudFunctionService.SendCommandAsync(feeder.DeviceId, commandPayload);
+
+                if (result.Success)
+                {
+                    Debug.WriteLine($"[SchedulingService] Successfully sent remote feed command to '{feeder.Name}'.");
+                }
+                else
+                {
+                    Debug.WriteLine($"[SchedulingService] Failed to send remote command to '{feeder.Name}': {result.Message}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[SchedulingService] Exception during remote feed for '{feeder.Name}': {ex.Message}");
+            }
         }
     }
 }

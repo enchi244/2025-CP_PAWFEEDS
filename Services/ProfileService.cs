@@ -1,90 +1,64 @@
-using PawfeedsProvisioner.Models;
-using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Text.Json;
+using PawfeedsProvisioner.Models;
 
-namespace PawfeedsProvisioner.Services;
-
-public class ProfileService
+namespace PawfeedsProvisioner.Services
 {
-    private const string FeedersKey = "FeedersData";
-
-    public void SaveFeeders(List<FeederViewModel> feeders)
+    public class ProfileService
     {
-        try
-        {
-            string feedersJson = JsonSerializer.Serialize(feeders);
-            Preferences.Set(FeedersKey, feedersJson);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error saving feeders data: {ex.Message}");
-        }
-    }
+        private readonly string _filePath;
+        private List<FeederViewModel>? _feedersCache; // In-memory cache
 
-    public List<FeederViewModel> LoadFeeders()
-    {
-        try
+        public ProfileService()
         {
-            string? feedersJson = Preferences.Get(FeedersKey, null);
-            if (string.IsNullOrEmpty(feedersJson))
+            _filePath = Path.Combine(FileSystem.AppDataDirectory, "feeders.json");
+        }
+
+        // This method now loads from file ONLY if the cache is empty.
+        public List<FeederViewModel> GetFeeders()
+        {
+            if (_feedersCache != null)
             {
-                return CreateDefaultFeeders();
+                return _feedersCache;
             }
 
-            var feeders = JsonSerializer.Deserialize<List<FeederViewModel>>(feedersJson);
-
-            if (feeders == null || !feeders.Any())
+            if (!File.Exists(_filePath))
             {
-                return CreateDefaultFeeders();
-            }
-
-            bool needsSave = false;
-            for (int i = 0; i < feeders.Count; i++)
-            {
-                if (feeders[i].Id == 0)
+                // Create two default feeders if the file doesn't exist.
+                _feedersCache = new List<FeederViewModel>
                 {
-                    feeders[i].Id = i + 1;
-                    needsSave = true;
-                }
+                    new FeederViewModel { Id = 1, Name = "Feeder 1" },
+                    new FeederViewModel { Id = 2, Name = "Feeder 2" }
+                };
+                return _feedersCache;
             }
-            if (needsSave)
+            try
             {
-                SaveFeeders(feeders);
+                var json = File.ReadAllText(_filePath);
+                _feedersCache = JsonSerializer.Deserialize<List<FeederViewModel>>(json) ?? new List<FeederViewModel>();
+                return _feedersCache;
             }
-
-            return feeders;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error loading feeders data: {ex.Message}");
-            return CreateDefaultFeeders();
-        }
-    }
-
-    private List<FeederViewModel> CreateDefaultFeeders()
-    {
-        var defaultFeeders = new List<FeederViewModel>
-        {
-            new FeederViewModel 
-            { 
-                Id = 1,
-                Name = "Feeder 1", 
-                Profiles = new ObservableCollection<PetProfileViewModel> 
-                { 
-                    new PetProfileViewModel { Name = "Dog A" } 
-                } 
-            },
-            new FeederViewModel 
-            { 
-                Id = 2,
-                Name = "Feeder 2",
-                Profiles = new ObservableCollection<PetProfileViewModel> 
-                { 
-                    new PetProfileViewModel { Name = "Dog B" } 
-                } 
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[ProfileService] Error loading feeders: {ex.Message}");
+                _feedersCache = new List<FeederViewModel>();
+                return _feedersCache;
             }
-        };
-        SaveFeeders(defaultFeeders);
-        return defaultFeeders;
+        }
+
+        // This method saves to the file AND updates the in-memory cache.
+        public void SaveFeeders(List<FeederViewModel> feeders)
+        {
+            try
+            {
+                _feedersCache = feeders; // Update the cache
+                var json = JsonSerializer.Serialize(feeders, new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(_filePath, json);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[ProfileService] Error saving feeders: {ex.Message}");
+            }
+        }
     }
 }
