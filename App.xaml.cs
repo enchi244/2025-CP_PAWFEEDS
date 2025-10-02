@@ -1,9 +1,15 @@
-﻿namespace PawfeedsProvisioner;
+﻿using PawfeedsProvisioner.Services;
+
+namespace PawfeedsProvisioner;
 
 public partial class App : Application
 {
-    public App()
+    private readonly SchedulingService _schedulingService;
+
+    public App(SchedulingService schedulingService)
     {
+        _schedulingService = schedulingService;
+
         // Set up universal crash handlers BEFORE initializing the UI
         AppDomain.CurrentDomain.UnhandledException += (sender, args) =>
         {
@@ -16,12 +22,26 @@ public partial class App : Application
             args.SetObserved();
         };
 
+        
         InitializeComponent();
         MainPage = new AppShell();
     }
 
+    protected override void OnSleep()
+    {
+        base.OnSleep();
+        _schedulingService.Stop();
+    }
+
+    protected override void OnResume()
+    {
+        base.OnResume();
+        _schedulingService.Start();
+    }
+
     private void LogCrash(Exception ex, string source)
     {
+        System.Diagnostics.Debug.WriteLine($"--- CRASH LOG: {source} ---");
         System.Diagnostics.Debug.WriteLine($"--- CRASH LOG: {source} ---");
         System.Diagnostics.Debug.WriteLine($"Timestamp: {DateTime.UtcNow:O}");
         if (ex != null)

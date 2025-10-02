@@ -10,11 +10,18 @@ namespace PawfeedsProvisioner.Pages;
 public partial class WelcomePage : ContentPage
 {
     private readonly AuthService _authService;
+    private readonly LanDiscoveryService _lanDiscovery;
+    private readonly ProvisioningClient _provisioningClient;
 
-    public WelcomePage(AuthService authService)
+    public WelcomePage(
+        AuthService authService,
+        LanDiscoveryService lanDiscoveryService,
+        ProvisioningClient provisioningClient)
     {
         InitializeComponent();
         _authService = authService;
+        _lanDiscovery = lanDiscoveryService;
+        _provisioningClient = provisioningClient;
     }
 
     private async void OnStartClicked(object sender, EventArgs e)
@@ -32,21 +39,12 @@ public partial class WelcomePage : ContentPage
 
     private async void OnResetClicked(object sender, EventArgs e)
     {
-        var lanDiscovery = Shell.Current.Handler?.MauiContext?.Services.GetService<LanDiscoveryService>();
-        var provisioningClient = Shell.Current.Handler?.MauiContext?.Services.GetService<ProvisioningClient>();
-
-        if (lanDiscovery is null || provisioningClient is null)
-        {
-            await DisplayAlert("Error", "Could not resolve necessary services. Please restart the app.", "OK");
-            return;
-        }
-
         SetBusyState(true);
         string? targetIp = null;
 
         try
         {
-            var deviceIps = await lanDiscovery.ScanForAnyDeviceAsync();
+            var deviceIps = await _lanDiscovery.ScanForAnyDeviceAsync();
 
             if (!deviceIps.Any())
             {
@@ -81,7 +79,7 @@ public partial class WelcomePage : ContentPage
 
                 if (confirm)
                 {
-                    bool success = await provisioningClient.FactoryResetAsync(targetIp);
+                    bool success = await _provisioningClient.FactoryResetAsync(targetIp);
                     if (success)
                     {
                         await DisplayAlert("Command Sent", $"The device at {targetIp} has been told to reset. It will now reboot into hotspot mode (PAWFEEDS-XXXX).", "OK");

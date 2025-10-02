@@ -137,6 +137,13 @@ public partial class DashboardPage : ContentPage
     protected override void OnAppearing()
     {
         base.OnAppearing();
+
+         var savedFeeders = _profileService.GetFeeders();
+        Feeders.Clear();
+        foreach (var feeder in savedFeeders)
+        {
+            Feeders.Add(feeder);
+        }
         
         string cameraIp = Uri.UnescapeDataString(CameraIp ?? string.Empty);
         string feederIp = Uri.UnescapeDataString(FeederIp ?? string.Empty);

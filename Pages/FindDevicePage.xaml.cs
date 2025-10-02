@@ -13,14 +13,16 @@ public partial class FindDevicePage : ContentPage
 {
     private readonly LanDiscoveryService _scan;
     private readonly FirestoreService _firestoreService;
+    private readonly ProfileService _profileService;
     private bool _isPostProvisioning = false;
     private CancellationTokenSource? _scanCts;
 
-    public FindDevicePage(LanDiscoveryService scan, FirestoreService firestoreService)
+    public FindDevicePage(LanDiscoveryService scan, FirestoreService firestoreService, ProfileService profileService)
     {
         InitializeComponent();
         _scan = scan;
         _firestoreService = firestoreService;
+        _profileService = profileService;
     }
 
     protected override async void OnAppearing()
@@ -83,6 +85,38 @@ public partial class FindDevicePage : ContentPage
                                 };
             
             var onlineDeviceList = onlineDevices.ToList();
+            
+            if (onlineDeviceList.Any())
+            {
+                var savedFeeders = _profileService.GetFeeders();
+
+                foreach (var device in onlineDeviceList)
+                {
+                    if (device.FeederId <= 0)
+                    {
+                        continue;
+                    }
+
+                    var feeder = savedFeeders.FirstOrDefault(f => f.Id == device.FeederId);
+                    if (feeder == null)
+                    {
+                        feeder = new FeederViewModel
+                        {
+                            Id = device.FeederId,
+                            Name = string.IsNullOrWhiteSpace(device.DisplayName)
+                                ? $"Feeder {device.FeederId}"
+                                : device.DisplayName
+                        };
+                        savedFeeders.Add(feeder);
+                    }
+
+                    feeder.CameraIp = device.Ip;
+                    feeder.FeederIp = device.FeederIp;
+                    feeder.DeviceId = device.DeviceId;
+                }
+
+                _profileService.SaveFeeders(savedFeeders);
+            }
             List.ItemsSource = onlineDeviceList;
 
             if (!onlineDeviceList.Any())

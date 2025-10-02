@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Logging;
+﻿﻿using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using PawfeedsProvisioner.Pages;
 using PawfeedsProvisioner.Services; // FIX: This line makes all your services visible
 using PawfeedsProvisioner.Platforms.Android;
@@ -55,7 +56,12 @@ public static class MauiProgram
         builder.Services.AddTransient<DashboardPage>();
         builder.Services.AddTransient<ConfirmationPage>();
 
-        return builder.Build();
+        var app = builder.Build();
+
+        var scheduler = app.Services.GetRequiredService<SchedulingService>();
+        scheduler.Start();
+
+        return app;
     }
 
     private static string GetFirebaseApiKey()
