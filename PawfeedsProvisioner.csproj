@@ -27,6 +27,9 @@
   
   <!-- Add Firestore package used by FirestoreService.cs -->
   <PackageReference Include="Plugin.Firebase.Firestore" Version="3.0.0" />
+
+  <!-- Add Cloud Messaging package for push notifications -->
+  <PackageReference Include="Plugin.Firebase.CloudMessaging" Version="3.0.0" />
   <!-- The Plugin.Firebase.Auth package was removed as AuthService.cs uses FirebaseAuthentication.net instead -->
   
   <!-- Other libraries -->
