@@ -120,12 +120,7 @@ namespace PawfeedsProvisioner.Services
         {
             scheduledDateTime = now.Date.Add(schedule.Time);
 
-            if (schedule == null)
-            {
-                return false;
-            }
-
-            if (!schedule.IsEnabled)
+            if (schedule == null || !schedule.IsEnabled)
             {
                 return false;
             }
@@ -141,16 +136,14 @@ namespace PawfeedsProvisioner.Services
                 return false;
             }
 
+            // If a schedule has never run, only trigger it if the due time was within the last minute.
+            // This prevents firing off old, "missed" schedules on the first run after app start or after adding a new schedule.
             if (schedule.LastTriggered == DateTime.MinValue)
             {
-                return true;
+                return (now - scheduledDateTime) < TimeSpan.FromMinutes(1);
             }
 
-            if (schedule.LastTriggered.Date < now.Date)
-            {
-                return true;
-            }
-
+            // If it has run before, it's due if the last run was before this current scheduled time.
             return schedule.LastTriggered < scheduledDateTime;
         }
         
