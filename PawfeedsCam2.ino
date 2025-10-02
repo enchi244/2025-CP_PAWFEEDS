@@ -1,0 +1,369 @@
+/*
+  PawfeedsCam_Feeder2_Listener.ino - FINAL CLOUD-ENABLED
+  - Connects to Wi-Fi.
+  - On first connection, calls a Cloud Function to register itself in Firestore.
+*/
+#include <WiFi.h>
+#include <Preferences.h>
+#include <HardwareSerial.h>
+#include <HTTPClient.h>
+
+#include "esp_camera.h"
+#include "esp_http_server.h"
+#include "img_converters.h"
+
+HardwareSerial SerialFromStandard(2); // RX2: 13, TX2: 12
+
+#define CAMERA_MODEL_AI_THINKER
+#if defined(CAMERA_MODEL_AI_THINKER)
+  #define PWDN_GPIO_NUM     32
+  #define RESET_GPIO_NUM    -1
+  #define XCLK_GPIO_NUM      0
+  #define SIOD_GPIO_NUM     26
+  #define SIOC_GPIO_NUM     27
+  #define Y9_GPIO_NUM       35
+  #define Y8_GPIO_NUM       34
+  #define Y7_GPIO_NUM       39
+  #define Y6_GPIO_NUM       36
+  #define Y5_GPIO_NUM       21
+  #define Y4_GPIO_NUM       19
+  #define Y3_GPIO_NUM       18
+  #define Y2_GPIO_NUM        5
+  #define VSYNC_GPIO_NUM    25
+  #define HREF_GPIO_NUM     23
+  #define PCLK_GPIO_NUM     22
+  #define LED_GPIO_NUM       4
+#endif
+
+Preferences prefs;
+httpd_handle_t httpdHandle = NULL;
+static const char* NVS_NS = "pawfeeds";
+static const uint8_t MAX_CONNECT_SECONDS = 30;
+unsigned long lastLogTime = 0;
+
+// --- IMPORTANT: Paste your Cloud Function URL here ---
+const char* cloudFunctionUrl = "https://registerdevice-cy5wm3auoq-df.a.run.app";
+
+String ipToStr(IPAddress ip) {
+  return String(ip[0]) + "." + ip[1] + "." + ip[2] + "." + ip[3];
+}
+
+void logKV(const char* k, const String& v) {
+  Serial.print(k); Serial.print(": "); Serial.println(v);
+}
+
+bool initCamera() {
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer   = LEDC_TIMER_0;
+  config.pin_d0       = Y2_GPIO_NUM;
+  config.pin_d1       = Y3_GPIO_NUM;
+  config.pin_d2       = Y4_GPIO_NUM;
+  config.pin_d3       = Y5_GPIO_NUM;
+  config.pin_d4       = Y6_GPIO_NUM;
+  config.pin_d5       = Y7_GPIO_NUM;
+  config.pin_d6       = Y8_GPIO_NUM;
+  config.pin_d7       = Y9_GPIO_NUM;
+  config.pin_xclk     = XCLK_GPIO_NUM;
+  config.pin_pclk     = PCLK_GPIO_NUM;
+  config.pin_vsync    = VSYNC_GPIO_NUM;
+  config.pin_href     = HREF_GPIO_NUM;
+  config.pin_sccb_sda = SIOD_GPIO_NUM;
+  config.pin_sccb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn     = PWDN_GPIO_NUM;
+  config.pin_reset    = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 10000000;
+  config.pixel_format = PIXFORMAT_JPEG;
+  
+  if (psramFound()) {
+    config.frame_size   = FRAMESIZE_VGA;
+    config.jpeg_quality = 12;
+    config.fb_count     = 1;
+  } else {
+    config.frame_size   = FRAMESIZE_QVGA;
+    config.jpeg_quality = 15;
+    config.fb_count     = 1;
+  }
+
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed: 0x%X\n", err);
+    return false;
+  }
+  pinMode(LED_GPIO_NUM, OUTPUT);
+  digitalWrite(LED_GPIO_NUM, LOW);
+  Serial.println("[OK] Camera Initialized");
+  return true;
+}
+
+static esp_err_t send_json(httpd_req_t* req, const String& body) {
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, body.c_str(), HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t status_handler(httpd_req_t* req) {
+    String ip = ipToStr(WiFi.localIP());
+    String hostname = WiFi.getHostname() ? String(WiFi.getHostname()) : "";
+    String body = String("{\"mode\":\"camera-sta\",\"connected\":true,\"ip\":\"") + ip + "\",\"hostname\":\"" + hostname + "\"}";
+    return send_json(req, body);
+}
+
+static esp_err_t flash_handler(httpd_req_t* req) {
+  char buf[32];
+  bool on=false;
+  int len = httpd_req_get_url_query_len(req) + 1;
+  if (len > 1 && len < 32) {
+    httpd_req_get_url_query_str(req, buf, len);
+    char val[8];
+    if (httpd_query_key_value(buf, "on", val, sizeof(val)) == ESP_OK) {
+      String v = String(val);
+      on = (v=="1" || v=="true" || v=="on");
+    }
+  }
+  digitalWrite(LED_GPIO_NUM, on?HIGH:LOW);
+  return send_json(req, String("{\"flash\":") + (on?"true":"false") + "}");
+}
+
+static esp_err_t stream_handler(httpd_req_t* req) {
+  camera_fb_t* fb = NULL;
+  esp_err_t res = ESP_OK;
+  char *part_buf[64];
+  
+  Serial.println("[STREAM] Client connected.");
+  
+  res = httpd_resp_set_type(req, "multipart/x-mixed-replace;boundary=frame");
+  if(res != ESP_OK){
+    return res;
+  }
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+  while(true){
+    fb = esp_camera_fb_get();
+    if (!fb) {
+      Serial.println("[STREAM] ERROR: Camera frame buffer could not be acquired");
+      res = ESP_FAIL;
+    } else {
+      if(res == ESP_OK){
+        res = httpd_resp_send_chunk(req, "--frame\r\n", 9);
+      }
+      if(res == ESP_OK){
+        size_t hlen = snprintf((char *)part_buf, 64, "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", fb->len);
+        res = httpd_resp_send_chunk(req, (const char *)part_buf, hlen);
+      }
+      if(res == ESP_OK){
+        res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+      }
+    }
+    
+    if(fb){
+      esp_camera_fb_return(fb);
+      fb = NULL;
+    }
+    
+    if(res != ESP_OK){
+      Serial.printf("[STREAM] Send chunk failed, client likely disconnected.\n");
+      break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  
+  httpd_resp_send_chunk(req, NULL, 0);
+  Serial.println("[STREAM] Client disconnected and handler finished.");
+  return res;
+}
+
+void eraseCreds() {
+  prefs.begin(NVS_NS, false);
+  prefs.remove("wifi_ssid");
+  prefs.remove("wifi_pass");
+  prefs.remove("hostname");
+  prefs.remove("uid");
+  prefs.remove("registered");
+  prefs.end();
+  Serial.println("[NVS] Cleared credentials, UID, and registered flag.");
+}
+
+static esp_err_t factory_reset_handler(httpd_req_t* req) {
+  eraseCreds();
+  send_json(req, "{\"ok\":true,\"reset\":true}");
+  Serial.println("[/factory_reset] Rebooting...");
+  delay(250);
+  ESP.restart();
+  return ESP_OK;
+}
+
+void register_handlers(httpd_handle_t srv) {
+  httpd_uri_t uri_status = { .uri="/status", .method=HTTP_GET, .handler=status_handler, .user_ctx=NULL };
+  httpd_uri_t uri_stream = { .uri="/stream", .method=HTTP_GET, .handler=stream_handler, .user_ctx=NULL };
+  httpd_uri_t uri_flash  = { .uri="/flash",  .method=HTTP_GET, .handler=flash_handler,  .user_ctx=NULL };
+  httpd_uri_t uri_freset = { .uri="/factory_reset", .method=HTTP_POST, .handler=factory_reset_handler, .user_ctx=NULL };
+
+  httpd_register_uri_handler(srv, &uri_status);
+  httpd_register_uri_handler(srv, &uri_stream);
+  httpd_register_uri_handler(srv, &uri_flash);
+  httpd_register_uri_handler(srv, &uri_freset);
+}
+
+bool start_http() {
+  httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
+  cfg.server_port = 80;
+  cfg.uri_match_fn = httpd_uri_match_wildcard;
+  cfg.max_open_sockets = 7;
+  cfg.stack_size = 1024 * 10;
+  cfg.lru_purge_enable = true;
+  if (httpd_start(&httpdHandle, &cfg) == ESP_OK) {
+    register_handlers(httpdHandle);
+    Serial.println("[HTTP] Server started with robust configuration");
+    return true;
+  }
+  Serial.println("[HTTP] Server start failed!");
+  return false;
+}
+
+void saveCreds(const String& ssid, const String& pass, const String& host, const String& uid) {
+  prefs.begin(NVS_NS, false);
+  prefs.putString("wifi_ssid", ssid);
+  prefs.putString("wifi_pass", pass);
+  prefs.putString("hostname", host);
+  prefs.putString("uid", uid);
+  prefs.putBool("registered", false);
+  prefs.end();
+  Serial.println("[NVS] Successfully saved credentials and UID for Feeder 2 CAM.");
+  Serial.printf("  -> SSID: %s\n", ssid.c_str());
+  Serial.printf("  -> Hostname: %s\n", host.c_str());
+  Serial.printf("  -> UID: %s\n", uid.c_str());
+}
+
+void registerDeviceInCloud() {
+  prefs.begin(NVS_NS, true);
+  bool isRegistered = prefs.getBool("registered", false);
+  String uid = prefs.getString("uid", "");
+  String hostname = prefs.getString("hostname", "");
+  prefs.end();
+
+  if (isRegistered || uid.length() == 0 || hostname.length() == 0) {
+    return;
+  }
+
+  Serial.println("[Cloud] Device not registered. Attempting to register now...");
+
+  HTTPClient http;
+  http.begin(cloudFunctionUrl);
+  http.addHeader("Content-Type", "application/json");
+
+  String deviceId = WiFi.macAddress();
+  deviceId.replace(":", "");
+  String payload = "{\"data\":{\"uid\":\"" + uid + "\",\"deviceId\":\"" + deviceId + "\",\"name\":\"" + hostname + "\"}}";
+
+  int httpCode = http.POST(payload);
+
+  if (httpCode > 0) {
+    String response = http.getString();
+    Serial.printf("[Cloud] Registration response code: %d\n", httpCode);
+    Serial.println("[Cloud] Response: " + response);
+    if (httpCode == 200) {
+      Serial.println("[Cloud] Registration successful! Setting flag.");
+      prefs.begin(NVS_NS, false);
+      prefs.putBool("registered", true);
+      prefs.end();
+    }
+  } else {
+    Serial.printf("[Cloud] Registration failed, error: %s\n", http.errorToString(httpCode).c_str());
+  }
+  http.end();
+}
+
+bool try_connect_sta_from_nvs() {
+  prefs.begin(NVS_NS, true);
+  String ssid = prefs.getString("wifi_ssid", "");
+  String pass = prefs.getString("wifi_pass", "");
+  String host = prefs.getString("hostname", "");
+  prefs.end();
+  if (ssid.length() == 0) {
+    Serial.println("[INFO] No credentials found in NVS.");
+    return false;
+  }
+
+  Serial.println("[STA] Credentials found. Attempting to connect to Wi-Fi...");
+  logKV("  -> SSID", ssid);
+  logKV("  -> Hostname", host);
+  WiFi.mode(WIFI_STA);
+  if (host.length()) WiFi.setHostname(host.c_str());
+  WiFi.begin(ssid.c_str(), pass.c_str());
+
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - t0) < (MAX_CONNECT_SECONDS * 1000UL)) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("[OK] Wi-Fi Connected!");
+    Serial.printf("  -> IP Address: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("  -> Hostname: %s\n", WiFi.getHostname());
+    registerDeviceInCloud();
+    return true;
+  }
+
+  Serial.printf("[FAIL] Wi-Fi connection failed. Status code: %d\n", WiFi.status());
+  return false;
+}
+
+void listenForSerialCreds() {
+    if (SerialFromStandard.available() > 0) {
+      Serial.println("\n[SERIAL] Data detected on Serial2 from Standard ESP32!");
+      String ssid = SerialFromStandard.readStringUntil('\n');
+      String pass = SerialFromStandard.readStringUntil('\n');
+      String hostname = SerialFromStandard.readStringUntil('\n');
+      String uid = SerialFromStandard.readStringUntil('\n');
+      
+      ssid.trim();
+      pass.trim();
+      hostname.trim();
+      uid.trim();
+      
+      bool isValid = ssid.length() > 0 && hostname.length() > 0 && uid.length() > 0;
+      if (isValid) {
+        Serial.println("[SERIAL] All credentials valid. Saving...");
+        saveCreds(ssid, pass, hostname, uid);
+        Serial.println("[SERIAL] Sending 'OK' acknowledgment to Standard ESP32.");
+        SerialFromStandard.println("OK");
+
+        Serial.println("[SERIAL] Rebooting in 2 seconds to connect to Wi-Fi...");
+        delay(2000);
+        ESP.restart();
+      } else {
+        Serial.println("[SERIAL] Invalid credentials received. Ignoring and continuing to listen.");
+      }
+    }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+  Serial.println("\n\n==================================================");
+  Serial.println("=== PawfeedsCam FEEDER 2 (Listener) Booting... ===");
+  Serial.println("==================================================");
+  SerialFromStandard.begin(9600, SERIAL_8N1, 13, 12);
+  Serial.println("[OK] Serial2 (RX:13, TX:12) initialized for receiving credentials.");
+  if (try_connect_sta_from_nvs()) {
+    Serial.println("[MODE] Provisioned. Starting camera and web server.");
+    initCamera();
+    start_http();
+  } else {
+    Serial.println("[MODE] Unprovisioned. Listening for credentials from Standard ESP32...");
+  }
+}
+
+void loop() {
+  if (WiFi.status() != WL_CONNECTED) {
+    listenForSerialCreds();
+    if (millis() - lastLogTime > 5000) {
+        Serial.print("Waiting for data on Serial2... ");
+        Serial.println(millis());
+        lastLogTime = millis();
+    }
+  }
+  delay(10);
+}
