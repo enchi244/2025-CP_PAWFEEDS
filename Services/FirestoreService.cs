@@ -45,5 +45,31 @@ namespace PawfeedsProvisioner.Services
                 return new List<Device>();
             }
         }
+
+        public async Task UpdateUserFcmToken(string token)
+        {
+            var uid = _authService.GetCurrentUserUid();
+            if (string.IsNullOrEmpty(uid) || string.IsNullOrEmpty(token))
+            {
+                Console.WriteLine("[FirestoreService] Cannot update FCM token. User not logged in or token is empty.");
+                return;
+            }
+
+            try
+            {
+                var userRef = _firestore.GetCollection("users").GetDocument(uid);
+                var data = new Dictionary<string, object>
+                {
+                    { "fcmToken", token },
+                    { "lastSeen", FieldValue.ServerTimestamp } // Good practice to update a timestamp
+                };
+                await userRef.SetDocumentAsync(data, SetOptions.MergeAll);
+                Console.WriteLine($"[FirestoreService] FCM token successfully updated for user {uid}.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[FirestoreService] Error updating FCM token: {ex.Message}");
+            }
+        }
     }
 }
