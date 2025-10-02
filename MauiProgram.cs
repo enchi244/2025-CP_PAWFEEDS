@@ -1,8 +1,10 @@
-﻿﻿using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using PawfeedsProvisioner.Pages;
-using PawfeedsProvisioner.Services; // FIX: This line makes all your services visible
+using PawfeedsProvisioner.Services;
 using PawfeedsProvisioner.Platforms.Android;
+using Plugin.Firebase.Core;
+using Plugin.Firebase.CloudMessaging;
+using System.Diagnostics;
 
 namespace PawfeedsProvisioner;
 
@@ -15,8 +17,45 @@ public static class MauiProgram
 #endif
     {
         var builder = MauiApp.CreateBuilder(useDefaults: true);
+
+#if ANDROID
+        builder.UseFirebase(context);
+#elif IOS
+        builder.UseFirebase(); // No context needed for iOS
+#endif
+
         builder
             .UseMauiApp<App>()
+            .UseFirebaseCloudMessaging(new FirebaseCloudMessagingOptions
+            {
+                // This is called when a new token is generated, or an old one is refreshed.
+                OnTokenRefresh = fcmToken =>
+                {
+                    Debug.WriteLine($"[FCM] Token Refreshed: {fcmToken}");
+                    // Note: Service provider isn't available here.
+                    // We will fetch and update the token after login.
+                },
+
+                // This is called when a notification is received while the app is in the foreground.
+                OnNotificationReceived = notification =>
+                {
+                    var title = notification.Title;
+                    var body = notification.Body;
+                    Debug.WriteLine($"[FCM] Foreground Notification Received: '{title}' - '{body}'");
+
+                    // You might want to display a local notification here.
+                },
+
+                // This is called when a user taps on a notification.
+                OnNotificationOpened = notification =>
+                {
+                    var title = notification.Title;
+                    var body = notification.Body;
+                    Debug.WriteLine($"[FCM] Notification Tapped: '{title}' - '{body}'");
+
+                    // You can navigate to a specific page based on the notification data.
+                }
+            })
             .ConfigureFonts(fonts =>
             {
                 fonts.AddFont("OpenSans-Regular.ttf", "OpenSansRegular");
@@ -24,9 +63,9 @@ public static class MauiProgram
             });
 
         #if DEBUG
-		    builder.Logging.AddDebug();
+            builder.Logging.AddDebug();
         #endif
-        
+
         string apiKey = GetFirebaseApiKey();
         builder.Services.AddSingleton(new AuthService(apiKey));
 
@@ -46,7 +85,7 @@ public static class MauiProgram
         builder.Services.AddSingleton<SchedulingService>();
 
         // Pages
-        builder.Services.AddTransient<LoginPage>();
+        builder.Services.AddTransient(provider => new LoginPage(provider.GetRequiredService<AuthService>(), provider.GetRequiredService<FirestoreService>()));
         builder.Services.AddTransient<WelcomePage>();
         builder.Services.AddTransient<ScanNetworksPage>();
         builder.Services.AddTransient<EnterCredentialsPage>();
