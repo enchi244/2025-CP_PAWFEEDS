@@ -61,9 +61,10 @@ namespace PawfeedsProvisioner.Services
                 var data = new Dictionary<string, object>
                 {
                     { "fcmToken", token },
-                    { "lastSeen", FieldValue.ServerTimestamp } // Good practice to update a timestamp
+                    { "lastSeen", FieldValue.ServerTimestamp() } // Correct: Invoke the method
                 };
-                await userRef.SetDocumentAsync(data, SetOptions.MergeAll);
+                // Correct: Use SetAsync and SetOptions.Merge()
+                await userRef.SetAsync(data, SetOptions.Merge());
                 Console.WriteLine($"[FirestoreService] FCM token successfully updated for user {uid}.");
             }
             catch (Exception ex)
