@@ -2,7 +2,6 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using PawfeedsProvisioner.Models;
-using System.Diagnostics; // Required for Debug.WriteLine
 
 namespace PawfeedsProvisioner.Services;
 
@@ -15,7 +14,7 @@ public class ProvisioningClient
     {
         _http = new HttpClient
         {
-            // FIX: correct AP address for provisioning mode
+            // BaseAddress is for the AP mode. We'll use full URLs for LAN calls.
             BaseAddress = new Uri("http://192.168.4.1/"),
             Timeout = TimeSpan.FromSeconds(20)
         };
@@ -78,65 +77,33 @@ public class ProvisioningClient
         }
     }
 
-    // More robust, detailed logging.
     public async Task<ProvisionResult?> ProvisionAsync(ProvisionRequest req, CancellationToken ct = default)
     {
         var jsonRequest = JsonSerializer.Serialize(req);
         var content = new StringContent(jsonRequest, Encoding.UTF8, "application/json");
-        
-        HttpResponseMessage resp;
-        try
-        {
-            resp = await _http.PostAsync("provision", content, ct);
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[ProvisioningClient] HTTP POST to /provision failed: {ex.Message}");
-            return new ProvisionResult { success = false, message = "HTTP request failed." };
-        }
-
-        var raw = await resp.Content.ReadAsStringAsync(ct);
-        Debug.WriteLine($"[ProvisioningClient] RAW RESPONSE from /provision: {raw}");
+        var resp = await _http.PostAsync("provision", content, ct);
 
         if (!resp.IsSuccessStatusCode)
-        {
-            Debug.WriteLine($"[ProvisioningClient] Received non-success status code: {(int)resp.StatusCode}");
-            return new ProvisionResult { success = false, message = $"HTTP {(int)resp.StatusCode}: {raw}" };
-        }
+            return new ProvisionResult { success = false, message = $"HTTP {(int)resp.StatusCode}" };
 
+        var raw = await resp.Content.ReadAsStringAsync(ct);
         if (string.IsNullOrWhiteSpace(raw))
-        {
-            Debug.WriteLine("[ProvisioningClient] Received an empty or whitespace response.");
-            return new ProvisionResult { success = false, message = "Empty response from device" };
-        }
+            return new ProvisionResult { success = false, message = "Empty response" };
 
         try
         {
             var trimmed = raw.Trim();
-            var pr = JsonSerializer.Deserialize<ProvisionResult>(trimmed, _json);
-
-            if (pr is not null)
+            if (trimmed.StartsWith("{"))
             {
-                Debug.WriteLine($"[ProvisioningClient] Deserialized successfully. Success: {pr.success}, Message: '{pr.message}', DeviceId: '{pr.deviceId}'");
-                if (string.IsNullOrWhiteSpace(pr.deviceId))
-                {
-                    Debug.WriteLine("[ProvisioningClient] WARNING: 'deviceId' missing or empty in JSON.");
-                }
-                return pr;
+                var pr = JsonSerializer.Deserialize<ProvisionResult>(trimmed, _json);
+                if (pr is not null) return pr;
             }
-            
-            Debug.WriteLine("[ProvisioningClient] Deserialization returned null. Treating as a failure.");
-            return new ProvisionResult { success = false, message = "Failed to deserialize response.", deviceId = null };
+
+            return new ProvisionResult { success = true, message = raw };
         }
-        catch (JsonException jsonEx)
+        catch
         {
-            Debug.WriteLine($"[ProvisioningClient] JSON Deserialization failed: {jsonEx.Message}");
-            return new ProvisionResult { success = false, message = "Invalid JSON response from device." };
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[ProvisioningClient] Unexpected parse error: {ex.Message}");
-            return new ProvisionResult { success = false, message = "Unexpected error processing response." };
+            return new ProvisionResult { success = true, message = raw };
         }
     }
     
@@ -160,6 +127,7 @@ public class ProvisioningClient
         }
     }
 
+    // --- START MODIFICATION: Updated method signature and logic ---
     public async Task<bool> FeedNowAsync(string ipAddress, int grams, int feederId, CancellationToken ct = default)
     {
         if (string.IsNullOrEmpty(ipAddress) || ipAddress == "N/A" || grams <= 0 || (feederId != 1 && feederId != 2))
@@ -173,10 +141,12 @@ public class ProvisioningClient
             cts.CancelAfter(TimeSpan.FromSeconds(10)); // Timeout for the request
 
             var url = $"http://{ipAddress}/feed";
-            var payload = new { grams, feeder = feederId };
+            var payload = new { grams, feeder = feederId }; // Add feederId to payload
             var jsonContent = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
             
             var response = await _http.PostAsync(url, jsonContent, cts.Token);
+            
+            // We consider any 2xx status code as success for starting the feed.
             return response.IsSuccessStatusCode;
         }
         catch (Exception ex)
@@ -185,6 +155,7 @@ public class ProvisioningClient
             return false;
         }
     }
+    // --- END MODIFICATION ---
 
     public async Task<string?> GetStatusAsync(CancellationToken ct = default)
     {
@@ -266,8 +237,8 @@ public class ProvisioningClient
     }
     private static IReadOnlyList<WifiNetwork> Normalize(List<WifiNetwork> list)
         => list.Where(n => !string.IsNullOrWhiteSpace(n.SSID))
-              .OrderByDescending(n => n.RSSI)
-              .ToList();
+               .OrderByDescending(n => n.RSSI)
+               .ToList();
     private static string Truncate(string s, int max)
         => s.Length <= max ? s : s.Substring(0, max) + "…";
 }

@@ -1,57 +1,37 @@
 <?xml version="1.0" encoding="utf-8" ?>
-<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
-             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
-             x:Class="PawfeedsProvisioner.Pages.ProvisioningPage"
-             Title="Provisioning">
+<ContentPage
+    x:Class="PawfeedsProvisioner.Pages.ProvisioningPage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    Title="Provisioning">
 
-    <ScrollView>
-        <VerticalStackLayout Padding="20" Spacing="16">
+  <ScrollView>
+    <VerticalStackLayout Padding="24" Spacing="16">
+      <Label x:Name="TitleLabel"
+             Text="Sending credentials to device…"
+             FontAttributes="Bold"
+             FontSize="20" />
 
-            <!-- Title / status -->
-            <Label x:Name="TitleLabel"
-                   Text="Preparing…"
-                   FontAttributes="Bold"
-                   FontSize="20"
-                   HorizontalTextAlignment="Center" />
+      <Label x:Name="Status"
+             Text="Please wait while we configure your device."
+             LineBreakMode="WordWrap" />
 
-            <Label x:Name="Status"
-                   Text="Waiting for credentials…"
-                   LineBreakMode="WordWrap"
-                   HorizontalTextAlignment="Center" />
+      <ActivityIndicator x:Name="Spinner" IsRunning="True" IsVisible="True" />
 
-            <!-- Spinner while talking to device -->
-            <ActivityIndicator x:Name="Spinner"
-                               IsVisible="True"
-                               IsRunning="True"
-                               HeightRequest="32" />
-
-            <!-- Next-steps card appears after we finish attempting provision -->
-            <Frame x:Name="NextStepsCard"
-       IsVisible="False"
-       Padding="16"
-       BorderColor="LightGray"
-       CornerRadius="12"
-       HasShadow="True">
-
-                <VerticalStackLayout Spacing="12">
-                    <Label Text="Next steps"
-                           FontAttributes="Bold"
-                           FontSize="18" />
-                    <Label Text="If you used the device's setup Wi-Fi (AP), reconnect your phone to your HOME Wi-Fi before continuing."
-                           LineBreakMode="WordWrap" />
-
-                    <Button Text="Open Wi-Fi Settings"
-                            Clicked="OpenWifi" />
-                </VerticalStackLayout>
-            </Frame>
-
-            <!-- Primary action: continue to confirmation -->
-            <Button x:Name="ContinueBtn"
-                    IsVisible="False"
-                    Text="Continue"
-                    Clicked="Continue"
-                    Margin="0,10,0,0" />
-
+      <!-- This shows after we POST successfully or even on handled failure -->
+      <Frame x:Name="NextStepsCard" IsVisible="False" Padding="16" BackgroundColor="#F3F4F6">
+        <VerticalStackLayout Spacing="8">
+          <Label Text="Next steps" FontAttributes="Bold" />
+          <Label Text="1) Reconnect your phone to your HOME Wi-Fi (the same network the device will join)." />
+          <Label Text="2) Return to this app and tap Continue." />
+          <Label Text="Tip: If you used the device hotspot PAWFEEDS-XXXX, you are no longer connected to the Internet after provisioning." />
         </VerticalStackLayout>
-    </ScrollView>
+      </Frame>
+
+      <HorizontalStackLayout Spacing="12">
+        <Button Text="Open Wi-Fi Settings" Clicked="OpenWifi" />
+        <Button x:Name="ContinueBtn" Text="Continue →" Clicked="Continue" IsVisible="False" />
+      </HorizontalStackLayout>
+    </VerticalStackLayout>
+  </ScrollView>
 </ContentPage>

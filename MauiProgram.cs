@@ -1,7 +1,7 @@
 ﻿using Microsoft.Extensions.Logging;
 using PawfeedsProvisioner.Pages;
-using PawfeedsProvisioner.Services;
-using PawfeedsProvisioner.Platforms.Android; // for NetworkInfoAndroid on Android
+using PawfeedsProvisioner.Services; // FIX: This line makes all your services visible
+using PawfeedsProvisioner.Platforms.Android;
 
 namespace PawfeedsProvisioner;
 
@@ -22,34 +22,29 @@ public static class MauiProgram
                 fonts.AddFont("OpenSans-Semibold.ttf", "OpenSansSemibold");
             });
 
-#if DEBUG
-        builder.Logging.AddDebug();
-#endif
-
-        // Auth (API key from your project)
+        #if DEBUG
+		    builder.Logging.AddDebug();
+        #endif
+        
         string apiKey = GetFirebaseApiKey();
         builder.Services.AddSingleton(new AuthService(apiKey));
 
         // Platform-specific services
 #if ANDROID
         builder.Services.AddSingleton<INetworkInfo>(new NetworkInfoAndroid(context));
-        builder.Services.AddSingleton<ISystemSettingsOpener, SystemSettingsOpener>();
-#else
-        // Fallbacks for other platforms
-        builder.Services.AddSingleton<ISystemSettingsOpener, StubSettingsOpener>();
 #endif
+        // Add other platforms like: #elif IOS ...
+        builder.Services.AddSingleton<ISystemSettingsOpener, SystemSettingsOpener>();
 
-        // Core app services
+        // App services
         builder.Services.AddSingleton<ProfileService>();
+        builder.Services.AddSingleton<LanDiscoveryService>();
         builder.Services.AddSingleton<ProvisioningClient>();
         builder.Services.AddSingleton(provider => new FirestoreService(provider.GetRequiredService<AuthService>()));
         builder.Services.AddSingleton<CloudFunctionService>();
         builder.Services.AddSingleton<SchedulingService>();
 
-        // LanDiscoveryService needs IServiceProvider; DI will pass the container automatically
-        builder.Services.AddSingleton<LanDiscoveryService>();
-
-        // Pages (Transient is fine)
+        // Pages
         builder.Services.AddTransient<LoginPage>();
         builder.Services.AddTransient<WelcomePage>();
         builder.Services.AddTransient<ScanNetworksPage>();

@@ -23,14 +23,8 @@
                                 <Frame.GestureRecognizers>
                                     <TapGestureRecognizer Tapped="OnDeviceTapped" />
                                 </Frame.GestureRecognizers>
-                                <Grid ColumnDefinitions="*, Auto" RowDefinitions="Auto, Auto, Auto, Auto">
-                                    <!-- Device Display Name -->
-                                    <Label Grid.Row="0" Grid.Column="0" 
-                                           Text="{Binding DisplayName}" 
-                                           FontSize="18" 
-                                           FontAttributes="Bold" />
-
-                                    <!-- Camera IP -->
+                                <Grid ColumnDefinitions="*, Auto" RowDefinitions="Auto, Auto, Auto">
+                                    <Label Grid.Row="0" Grid.Column="0" Text="{Binding DisplayName}" FontSize="18" FontAttributes="Bold" />
                                     <Label Grid.Row="1" Grid.Column="0" FontSize="14">
                                         <Label.FormattedText>
                                             <FormattedString>
@@ -39,8 +33,6 @@
                                             </FormattedString>
                                         </Label.FormattedText>
                                     </Label>
-
-                                    <!-- Feeder IP -->
                                     <Label Grid.Row="2" Grid.Column="0" FontSize="14">
                                         <Label.FormattedText>
                                             <FormattedString>
@@ -49,23 +41,7 @@
                                             </FormattedString>
                                         </Label.FormattedText>
                                     </Label>
-
-                                    <!-- Feeder Slot -->
-                                    <Label Grid.Row="3" Grid.Column="0" FontSize="14">
-                                        <Label.FormattedText>
-                                            <FormattedString>
-                                                <Span Text="Feeder Slot: " FontAttributes="Bold" />
-                                                <Span Text="{Binding FeederId}" />
-                                            </FormattedString>
-                                        </Label.FormattedText>
-                                    </Label>
-
-                                    <!-- Chevron Icon -->
-                                    <Image Grid.Row="0" Grid.RowSpan="4" Grid.Column="1" 
-                                           Source="chevron_right.png" 
-                                           HeightRequest="20" 
-                                           Aspect="AspectFit" 
-                                           VerticalOptions="Center" />
+                                    <Image Grid.Row="0" Grid.RowSpan="3" Grid.Column="1" Source="chevron_right.png" HeightRequest="20" Aspect="AspectFit" VerticalOptions="Center" />
                                 </Grid>
                             </Frame>
                         </DataTemplate>
@@ -74,7 +50,6 @@
 
             </VerticalStackLayout>
         </ScrollView>
-
         <VerticalStackLayout Grid.Row="1" Padding="20" Spacing="10">
             <Button Text="Rescan" Clicked="OnRescan" />
             <Button x:Name="DoneButton" Text="Done" IsVisible="False" Clicked="OnDone" />

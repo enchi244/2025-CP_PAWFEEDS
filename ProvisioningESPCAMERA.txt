@@ -241,14 +241,11 @@ void eraseCreds() {
   Serial.println("[NVS] Cleared credentials, UID, and registered flag.");
 }
 
-// --- MODIFICATION START ---
-// This is the corrected provisioning handler. It now generates a unique deviceId
-// from the MAC address and includes it in the JSON response to the mobile app.
 static esp_err_t provision_handler(httpd_req_t* req) {
   String ssid, pass, host, uid;
   if (!read_json_body(req, ssid, pass, host, uid)) {
     Serial.println("[/provision] Bad or missing JSON (ensure uid is included)");
-    return send_json(req, "{\"success\":false, \"message\":\"Invalid request body\"}");
+    return send_json(req, "{\"accepted\":false}");
   }
 
   saveCreds(ssid, pass, host, uid);
@@ -263,21 +260,13 @@ static esp_err_t provision_handler(httpd_req_t* req) {
   SerialSlave.printf("%s\n%s\n%s\n%s\n", ssid.c_str(), pass.c_str(), customName.c_str(), uid.c_str());
   Serial.println("[Serial] Info sent.");
   
-  // Create the unique deviceId from the MAC address.
-  String deviceId = WiFi.macAddress();
-  deviceId.replace(":", "");
-  Serial.printf("[/provision] Generated deviceId: %s\n", deviceId.c_str());
-
-  // Construct the complete and correct JSON response.
-  String body = "{\"success\":true,\"message\":\"Provisioned OK\",\"deviceId\":\"" + deviceId + "\"}";
-  send_json(req, body);
+  send_json(req, "{\"accepted\":true}");
 
   Serial.println("[/provision] Rebooting Master...");
   delay(1000);
   ESP.restart();
   return ESP_OK;
 }
-// --- MODIFICATION END ---
 
 static esp_err_t factory_reset_handler(httpd_req_t* req) {
   eraseCreds();

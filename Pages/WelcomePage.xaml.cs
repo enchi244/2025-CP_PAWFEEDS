@@ -1,217 +1,114 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Net;
-using System.Net.NetworkInformation;
-using System.Net.Sockets;
-using System.Net.Http;
-using System.Threading;
-using System.Threading.Tasks;
-using Microsoft.Maui.Controls;
 using PawfeedsProvisioner.Services;
+using Microsoft.Extensions.DependencyInjection; // Required for GetService
+using System;
+using System.Linq; // Required for LINQ methods like Count()
+using System.Threading.Tasks; // Required for Task
+using Microsoft.Maui.Controls; // Required for ContentPage and UI elements
 
-namespace PawfeedsProvisioner.Pages
+namespace PawfeedsProvisioner.Pages;
+
+public partial class WelcomePage : ContentPage
 {
-    public partial class WelcomePage : ContentPage
+    private readonly AuthService _authService;
+
+    public WelcomePage(AuthService authService)
     {
-        private readonly ProvisioningClient _provisioningClient;
-        private readonly LanDiscoveryService _lanDiscovery; // kept for other flows, not required for quick scan
-        private readonly ISystemSettingsOpener _settings;
-        private readonly AuthService _auth;
+        InitializeComponent();
+        _authService = authService;
+    }
 
-        public WelcomePage(ProvisioningClient provisioningClient,
-                           LanDiscoveryService lanDiscovery,
-                           ISystemSettingsOpener settings,
-                           AuthService auth)
+    private async void OnStartClicked(object sender, EventArgs e)
+        => await Shell.Current.GoToAsync("//ConnectToDevicePage");
+
+    private async void OnFindClicked(object sender, EventArgs e)
+        => await Shell.Current.GoToAsync("//find");
+        
+    private async void OnSignOutClicked(object sender, EventArgs e)
+    {
+        // CORRECTED: The SignOut method is synchronous.
+        _authService.SignOut();
+        await Shell.Current.GoToAsync("//LoginPage");
+    }
+
+    private async void OnResetClicked(object sender, EventArgs e)
+    {
+        var lanDiscovery = Shell.Current.Handler?.MauiContext?.Services.GetService<LanDiscoveryService>();
+        var provisioningClient = Shell.Current.Handler?.MauiContext?.Services.GetService<ProvisioningClient>();
+
+        if (lanDiscovery is null || provisioningClient is null)
         {
-            InitializeComponent();
-            _provisioningClient = provisioningClient;
-            _lanDiscovery = lanDiscovery;
-            _settings = settings;
-            _auth = auth;
+            await DisplayAlert("Error", "Could not resolve necessary services. Please restart the app.", "OK");
+            return;
         }
 
-        // Wired in XAML: Clicked="OnStartClicked"
-        private async void OnStartClicked(object sender, EventArgs e)
-        {
-            // FIX: start provisioning flow at ConnectToDevicePage instead of ScanNetworksPage
-            await Shell.Current.GoToAsync(nameof(ConnectToDevicePage));
-        }
+        SetBusyState(true);
+        string? targetIp = null;
 
-        // Wired in XAML: Clicked="OnFindClicked"
-        private async void OnFindClicked(object sender, EventArgs e)
+        try
         {
-            await Shell.Current.GoToAsync("//find");
-        }
+            var deviceIps = await lanDiscovery.ScanForAnyDeviceAsync();
 
-        // Wired in XAML: Clicked="OnSignOutClicked"
-        private async void OnSignOutClicked(object sender, EventArgs e)
-        {
-            try { await _auth.SignOutAsync(); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[WelcomePage] SignOut failed: {ex.Message}"); }
-            await Shell.Current.GoToAsync("//login");
-        }
-
-        // Wired in XAML: Clicked="OnResetClicked"
-        private async void OnResetClicked(object sender, EventArgs e)
-        {
-            try
+            if (!deviceIps.Any())
             {
-                // 1) Try the ultra-simple quick scan first
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
-                var ips = await QuickFindEspIpsAsync(cts.Token);
+                bool manualEntry = await DisplayAlert(
+                    "Device Not Found",
+                    "The automatic scan could not find any devices. This can be caused by router settings like 'AP Isolation'.\n\nWould you like to enter the device's IP address manually?",
+                    "Yes, Enter IP",
+                    "Cancel");
 
-                string? targetIp = null;
-
-                if (ips.Count == 1)
+                if (manualEntry)
                 {
-                    // Single hit → reset immediately
-                    targetIp = ips[0];
+                    targetIp = await DisplayPromptAsync("Manual Reset", "Enter the IP address of the device you want to reset:", "Reset", "Cancel", keyboard: Keyboard.Numeric, initialValue: "192.168.1.");
                 }
-                else if (ips.Count > 1)
-                {
-                    // Multiple hits → let the user pick which IP to reset
-                    var selected = await DisplayActionSheet("Select a device to reset", "Cancel", null, ips.ToArray());
-                    if (string.IsNullOrEmpty(selected) || selected == "Cancel") return;
-                    targetIp = selected;
-                }
-                else
-                {
-                    // 2) No hits: offer AP mode or manual IP as fallback
-                    var choice = await DisplayActionSheet(
-                        "No devices found by quick scan",
-                        "Cancel", null,
-                        "Use AP (192.168.4.1)",
-                        "Enter IP Manually");
+            }
+            else if (deviceIps.Count == 1)
+            {
+                targetIp = deviceIps[0];
+            }
+            else
+            {
+                var ipAddresses = deviceIps.ToArray();
+                targetIp = await DisplayActionSheet("Multiple Devices Found", "Cancel", null, ipAddresses);
+            }
 
-                    if (string.IsNullOrEmpty(choice) || choice == "Cancel")
-                        return;
+            if (!string.IsNullOrWhiteSpace(targetIp) && targetIp != "Cancel")
+            {
+                bool confirm = await DisplayAlert(
+                    "Confirm Reset",
+                    $"Are you sure you want to factory reset the device at {targetIp}? This will erase its saved Wi-Fi credentials.",
+                    "Yes, Reset",
+                    "Cancel");
 
-                    if (choice == "Use AP (192.168.4.1)")
+                if (confirm)
+                {
+                    bool success = await provisioningClient.FactoryResetAsync(targetIp);
+                    if (success)
                     {
-                        await _settings.OpenWifiSettingsAsync();
-                        targetIp = "192.168.4.1";
+                        await DisplayAlert("Command Sent", $"The device at {targetIp} has been told to reset. It will now reboot into hotspot mode (PAWFEEDS-XXXX).", "OK");
                     }
-                    else // "Enter IP Manually"
+                    else
                     {
-                        var ipInput = await DisplayPromptAsync("Manual IP", "Enter device IP address (e.g., 192.168.1.123):", keyboard: Keyboard.Plain);
-                        if (string.IsNullOrWhiteSpace(ipInput)) return;
-
-                        if (!IPAddress.TryParse(ipInput.Trim(), out _))
-                        {
-                            await DisplayAlert("Invalid IP", "Please enter a valid IPv4 address.", "OK");
-                            return;
-                        }
-                        targetIp = ipInput.Trim();
+                        await DisplayAlert("Error", $"The reset command failed. The device at {targetIp} may be offline or the IP address might be incorrect.", "OK");
                     }
                 }
-
-                if (string.IsNullOrWhiteSpace(targetIp)) return;
-
-                var ok = await _provisioningClient.FactoryResetAsync(targetIp);
-                if (ok)
-                {
-                    await DisplayAlert("Reset Sent", $"Factory reset command sent to {targetIp}. The device will reboot shortly.", "OK");
-                }
-                else
-                {
-                    await DisplayAlert("Reset Failed", $"Could not reset the device at {targetIp}. Ensure you are connected to the correct Wi-Fi (device AP for 192.168.4.1) and try again.", "OK");
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                await DisplayAlert("Timed Out", "The quick scan timed out. Try again, or use AP / Manual IP.", "OK");
-            }
-            catch (Exception ex)
-            {
-                await DisplayAlert("Error", $"Unexpected error during reset: {ex.Message}", "OK");
             }
         }
-
-        // =========================
-        // Quick local /24 ESP scan
-        // =========================
-        private async Task<List<string>> QuickFindEspIpsAsync(CancellationToken ct)
+        catch (Exception ex)
         {
-            var local = GetLocalIPv4();
-            if (local == null) return new List<string>();
-
-            var prefix = local.GetAddressBytes();
-            var hits = new List<string>();
-            var hitsLock = new object();
-
-            using var http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(900) };
-            using var sem = new SemaphoreSlim(64);
-
-            var tasks = new List<Task>();
-            for (int host = 1; host <= 254; host++)
-            {
-                var ip = new IPAddress(new byte[] { prefix[0], prefix[1], prefix[2], (byte)host });
-                if (ip.Equals(local)) continue;
-
-                await sem.WaitAsync(ct);
-                tasks.Add(Task.Run(async () =>
-                {
-                    try
-                    {
-                        var ipStr = ip.ToString();
-
-                        // We only need a 200 from /hello OR /status to accept the host.
-                        if (await IsEspAtAsync(http, ipStr, ct))
-                        {
-                            lock (hitsLock) hits.Add(ipStr);
-                        }
-                    }
-                    catch { /* ignore per host */ }
-                    finally { sem.Release(); }
-                }, ct));
-            }
-
-            await Task.WhenAll(tasks);
-            // Sort for stable UI
-            hits.Sort((a, b) =>
-            {
-                // numerical sort on last octet
-                var aLast = int.TryParse(a.Split('.').Last(), out var ai) ? ai : 0;
-                var bLast = int.TryParse(b.Split('.').Last(), out var bi) ? bi : 0;
-                return aLast.CompareTo(bLast);
-            });
-            return hits;
+            await DisplayAlert("Scan Error", $"An error occurred while scanning the network: {ex.Message}", "OK");
         }
-
-        private static async Task<bool> IsEspAtAsync(HttpClient http, string ip, CancellationToken ct)
+        finally
         {
-            // Try /hello first, then /status; any 200 is considered a hit.
-            try
-            {
-                using var r1 = await http.GetAsync($"http://{ip}/hello", ct);
-                if ((int)r1.StatusCode >= 200 && (int)r1.StatusCode < 300) return true;
-            }
-            catch { /* ignore */ }
-
-            try
-            {
-                using var r2 = await http.GetAsync($"http://{ip}/status", ct);
-                if ((int)r2.StatusCode >= 200 && (int)r2.StatusCode < 300) return true;
-            }
-            catch { /* ignore */ }
-
-            return false;
+            SetBusyState(false);
         }
+    }
 
-        private static IPAddress? GetLocalIPv4()
-        {
-            foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
-            {
-                if (ni.OperationalStatus != OperationalStatus.Up) continue;
-                var props = ni.GetIPProperties();
-                foreach (var ua in props.UnicastAddresses)
-                {
-                    if (ua.Address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ua.Address))
-                        return ua.Address;
-                }
-            }
-            return null;
-        }
+    private void SetBusyState(bool isBusy)
+    {
+        ResetSpinner.IsVisible = isBusy;
+        ResetSpinner.IsRunning = isBusy;
+        StartBtn.IsEnabled = !isBusy;
+        FindBtn.IsEnabled = !isBusy;
+        ResetBtn.IsEnabled = !isBusy;
     }
 }

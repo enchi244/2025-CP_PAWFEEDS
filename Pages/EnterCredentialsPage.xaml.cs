@@ -1,8 +1,5 @@
 using PawfeedsProvisioner.Models;
 using PawfeedsProvisioner.Services;
-using System;
-using System.Collections.Generic;
-using Microsoft.Maui.Controls;
 
 namespace PawfeedsProvisioner.Pages;
 
@@ -10,7 +7,6 @@ namespace PawfeedsProvisioner.Pages;
 public partial class EnterCredentialsPage : ContentPage
 {
     private readonly AuthService _authService;
-    private readonly FirestoreService _firestore;
 
     public string SSID
     {
@@ -18,11 +14,10 @@ public partial class EnterCredentialsPage : ContentPage
         set { if (SsidEntry != null) SsidEntry.Text = value; }
     }
 
-    public EnterCredentialsPage(AuthService authService, FirestoreService firestore)
+    public EnterCredentialsPage(AuthService authService)
     {
         InitializeComponent();
         _authService = authService;
-        _firestore = firestore;
     }
 
     private static string Esc(string s)
@@ -30,6 +25,7 @@ public partial class EnterCredentialsPage : ContentPage
 
     private string? GetPasswordOrNull()
     {
+        // Try both typical names; if neither exists, return null
         var pass1 = this.FindByName<Entry>("PassEntry");
         if (pass1 != null) return pass1.Text;
 
@@ -60,7 +56,6 @@ public partial class EnterCredentialsPage : ContentPage
             return;
         }
 
-        // Resolve user (UID required for provisioning)
         var userId = _authService.GetCurrentUserUid();
         if (string.IsNullOrEmpty(userId))
         {
@@ -73,25 +68,17 @@ public partial class EnterCredentialsPage : ContentPage
 
         try
         {
-            // Check Firestore for Feeder 1 existence
-            string feeder1Hostname = $"pawfeeds-cam-{host}";
-            bool feeder1Exists = await _firestore.DeviceWithHostnameExistsAsync(feeder1Hostname);
-
-            int feederId = feeder1Exists ? 2 : 1;
-            string fullHostname = feederId == 2 ? $"{feeder1Hostname}-2" : feeder1Hostname;
-
+            string fullHostname = $"pawfeeds-cam-{host!}";
             var req = new ProvisionRequest
             {
                 ssid = ssid!,
                 password = pass ?? string.Empty,
                 hostname = fullHostname,
-                uid = userId,
-                feederId = feederId
+                uid = userId
             };
 
-            var json = $"{{\"ssid\":\"{Esc(req.ssid)}\",\"password\":\"{Esc(req.password)}\",\"hostname\":\"{Esc(req.hostname)}\",\"uid\":\"{Esc(req.uid)}\",\"feederId\":{req.feederId}}}";
+            var json = $"{{\"ssid\":\"{Esc(req.ssid)}\",\"password\":\"{Esc(req.password)}\",\"hostname\":\"{Esc(req.hostname)}\",\"uid\":\"{Esc(req.uid)}\"}}";
             var url = $"//provision?reqJson={Uri.EscapeDataString(json)}";
-
             await Shell.Current.GoToAsync(url, new Dictionary<string, object> { ["req"] = req });
         }
         finally

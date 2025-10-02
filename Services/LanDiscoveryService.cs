@@ -1,298 +1,194 @@
-using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Linq;
 using System.Net;
-using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
-using PawfeedsProvisioner.Models;
+using System.Diagnostics;
 
-namespace PawfeedsProvisioner.Services
+namespace PawfeedsProvisioner.Services;
+
+// --- START MODIFICATION ---
+// Added ContainerWeight to the device status information
+public record DeviceStatus(string DisplayName, string Hostname, string Ip, string FeederIp, int FeederId, double ContainerWeight);
+// --- END MODIFICATION ---
+
+public class LanDiscoveryService
 {
-    /// <summary>
-    /// Discovers Pawfeeds devices on the local /24 by probing /hello and /status.
-    /// Tolerant: if either endpoint returns HTTP 200, we treat the host as a device.
-    /// Pairs camera (pawfeeds-cam-*) with feeder (pawfeeds-std-*) and infers FeederId from "-2" suffix.
-    /// </summary>
-    public class LanDiscoveryService
+    private readonly IServiceProvider _serviceProvider;
+
+    public LanDiscoveryService(IServiceProvider serviceProvider)
     {
-        private readonly IServiceProvider _sp;
+        _serviceProvider = serviceProvider;
+    }
 
-        public LanDiscoveryService(IServiceProvider sp)
+    public async Task<List<DeviceStatus>> ScanAsync(CancellationToken ct = default)
+    {
+        var netInfo = _serviceProvider.GetService<INetworkInfo>();
+        if (netInfo == null) return new();
+
+        var (localIp, _) = netInfo.GetLocalIpAndPrefix();
+        if (localIp == null || localIp.AddressFamily != AddressFamily.InterNetwork)
+            return new();
+
+        var bytes = localIp.GetAddressBytes();
+        var netPrefix = new byte[] { bytes[0], bytes[1], bytes[2], 0 };
+        
+        // --- START MODIFICATION ---
+        // The tuple now includes a spot to store the weight from the feeder's status
+        var discoveredDevices = new ConcurrentBag<(string Ip, string Mode, string Hostname, double Weight)>();
+        // --- END MODIFICATION ---
+        
+        var tasks = new List<Task>();
+        using var sem = new SemaphoreSlim(32);
+        using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+
+        for (int host = 1; host <= 254; host++)
         {
-            _sp = sp;
-        }
+            var ip = new IPAddress(new byte[] { netPrefix[0], netPrefix[1], netPrefix[2], (byte)host }).ToString();
+            if (ip == localIp.ToString()) continue;
 
-        /// <summary>
-        /// Main scan used by FindDevicePage. Returns paired entries per feeder slot (1/2).
-        /// </summary>
-        public async Task<List<OnlineDeviceViewModel>> ScanAsync(CancellationToken ct)
-        {
-            var localIp = GetLocalIPv4();
-            if (localIp == null)
+            await sem.WaitAsync(ct);
+            tasks.Add(Task.Run(async () =>
             {
-                Debug.WriteLine("[LanDiscovery] No local IPv4 found.");
-                return new List<OnlineDeviceViewModel>();
-            }
-
-            var prefix = localIp.GetAddressBytes();
-            var cams = new ConcurrentDictionary<string, (string hostname, string ip)>();
-            var stds = new ConcurrentDictionary<string, (string hostname, string ip, double weight)>();
-
-            using var http = new HttpClient() { Timeout = TimeSpan.FromSeconds(3) };
-            var sem = new SemaphoreSlim(64);
-            var tasks = new List<Task>(254);
-
-            for (int host = 1; host <= 254; host++)
-            {
-                var ip = new IPAddress(new byte[] { prefix[0], prefix[1], prefix[2], (byte)host });
-                if (ip.Equals(localIp)) continue;
-
-                await sem.WaitAsync(ct);
-                tasks.Add(Task.Run(async () =>
+                try
                 {
-                    try
+                    var url = $"http://{ip}/status";
+                    Debug.WriteLine($"[LanDiscoveryService] Scanning IP: {ip}...");
+                    using var resp = await httpClient.GetAsync(url, ct);
+
+                    if (!resp.IsSuccessStatusCode)
                     {
-                        await ProbeHostAsync(http, ip.ToString(), cams, stds, ct);
+                        Debug.WriteLine($"[LanDiscoveryService] Failed to get status from {ip}. Status: {resp.StatusCode}");
+                        return;
                     }
-                    catch
+
+                    using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+                    var root = doc.RootElement;
+                    var mode = root.TryGetProperty("mode", out var m) ? m.GetString() ?? "" : "";
+                    var connected = root.TryGetProperty("connected", out var c) && c.GetBoolean();
+                    var hostname = root.TryGetProperty("hostname", out var h) ? h.GetString() ?? "" : "";
+
+                    // --- START MODIFICATION ---
+                    // We parse the container_weight_grams field from the JSON response.
+                    var weight = root.TryGetProperty("container_weight_grams", out var w) ? w.GetDouble() : 0.0;
+                    // --- END MODIFICATION ---
+
+                    if (connected && !string.IsNullOrEmpty(mode) && !string.IsNullOrEmpty(hostname))
                     {
-                        // per-host errors ignored
+                        Debug.WriteLine($"[LanDiscoveryService] SUCCESS! Discovered {hostname} at {ip}");
+                        // --- START MODIFICATION ---
+                        // The discovered weight is now added to our collection
+                        discoveredDevices.Add((ip, mode, hostname, weight));
+                        // --- END MODIFICATION ---
                     }
-                    finally
+                    else
                     {
-                        sem.Release();
+                        Debug.WriteLine($"[LanDiscoveryService] Device at {ip} did not match expected criteria.");
                     }
-                }, ct));
-            }
-
-            await Task.WhenAll(tasks);
-
-            // Pair by core name + feeder slot
-            var keys = new HashSet<(string core, int feederId)>();
-            foreach (var k in cams.Keys)
-            {
-                var (core, fid) = ParseCoreAndFeeder(k);
-                keys.Add((core, fid));
-            }
-            foreach (var k in stds.Keys)
-            {
-                var (core, fid) = ParseCoreAndFeeder(k);
-                keys.Add((core, fid));
-            }
-
-            var list = new List<OnlineDeviceViewModel>();
-            foreach (var key in keys)
-            {
-                // Reconstruct canonical keys
-                string camKey = $"pawfeeds-cam-{key.core}" + (key.feederId == 2 ? "-2" : "");
-                string stdKey = $"pawfeeds-std-{key.core}";
-
-                cams.TryGetValue(camKey, out var cam);
-                stds.TryGetValue(stdKey, out var std);
-
-                var displayName = $"{key.core} • Feeder {key.feederId}";
-                var vm = new OnlineDeviceViewModel
-                {
-                    DeviceId = "", // injected later by FindDevicePage from Firestore/provision
-                    DisplayName = displayName,
-                    Hostname = !string.IsNullOrWhiteSpace(cam.hostname) ? cam.hostname :
-                               (!string.IsNullOrWhiteSpace(std.hostname) ? std.hostname : $"pawfeeds-{key.core}"),
-                    Ip = cam.ip,               // camera IP (may be null/empty if not found)
-                    FeederIp = std.ip,         // feeder IP (may be null/empty if not found)
-                    FeederId = key.feederId,
-                    ContainerWeight = std.weight
-                };
-                list.Add(vm);
-            }
-
-            // Sort for stable UI
-            return list.OrderBy(v => v.DisplayName).ToList();
-        }
-
-        // =======================
-        // Helpers / probe logic
-        // =======================
-
-        private static IPAddress? GetLocalIPv4()
-        {
-            foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
-            {
-                if (ni.OperationalStatus != OperationalStatus.Up) continue;
-                var props = ni.GetIPProperties();
-                foreach (var ua in props.UnicastAddresses)
-                {
-                    if (ua.Address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ua.Address))
-                        return ua.Address;
                 }
-            }
-            return null;
-        }
-
-        private static (string core, int feederId) ParseCoreAndFeeder(string hostname)
-        {
-            // pawfeeds-cam-rocket      -> core=rocket, fid=1
-            // pawfeeds-cam-rocket-2    -> core=rocket, fid=2
-            // pawfeeds-std-rocket      -> core=rocket, fid inferred by paired cam key (default 1)
-            var s = hostname;
-            if (s.StartsWith("pawfeeds-cam-")) s = s.Substring("pawfeeds-cam-".Length);
-            if (s.StartsWith("pawfeeds-std-")) s = s.Substring("pawfeeds-std-".Length);
-
-            int fid = 1;
-            if (s.EndsWith("-2", StringComparison.Ordinal))
-            {
-                fid = 2;
-                s = s.Substring(0, s.Length - 2);
-            }
-            return (s, fid);
-        }
-
-        private static async Task ProbeHostAsync(
-    HttpClient http,
-    string ip,
-    ConcurrentDictionary<string, (string hostname, string ip)> cams,
-    ConcurrentDictionary<string, (string hostname, string ip, double weight)> stds,
-    CancellationToken ct)
-{
-    string? hostname = null;
-    string? type = null;
-    double weight = 0;
-    bool anyOk = false;
-
-    // /hello (tolerant)
-    try
-    {
-        using var resp = await http.GetAsync($"http://{ip}/hello", ct);
-        if (resp.IsSuccessStatusCode)
-        {
-            anyOk = true;
-            var s = await resp.Content.ReadAsStringAsync(ct);
-            TryParseHello(s, out var hostFromHello, out var typeFromHello);
-            if (!string.IsNullOrWhiteSpace(hostFromHello)) hostname = hostFromHello;
-            if (!string.IsNullOrWhiteSpace(typeFromHello)) type = typeFromHello;
-        }
-    }
-    catch { /* ignore */ }
-
-    // /status (tolerant)
-    try
-    {
-        using var resp = await http.GetAsync($"http://{ip}/status", ct);
-        if (resp.IsSuccessStatusCode)
-        {
-            anyOk = true;
-            var s = await resp.Content.ReadAsStringAsync(ct);
-            TryParseStatus(s, out var hostFromStatus, out var typeFromStatus, out var weightFromStatus);
-            if (!string.IsNullOrWhiteSpace(hostFromStatus)) hostname ??= hostFromStatus;
-            if (!string.IsNullOrWhiteSpace(typeFromStatus)) type ??= typeFromStatus;
-            if (weightFromStatus.HasValue) weight = weightFromStatus.Value;
-        }
-    }
-    catch { /* ignore */ }
-
-    if (!anyOk) return;
-
-    // Heuristics if "type" missing
-    var finalHost = hostname ?? string.Empty;
-    if (string.IsNullOrWhiteSpace(type))
-    {
-        if (finalHost.StartsWith("pawfeeds-cam-")) type = "camera";
-        else if (finalHost.StartsWith("pawfeeds-std-")) type = "feeder";
-    }
-
-    if (type == "camera")
-    {
-        var key = !string.IsNullOrWhiteSpace(finalHost) ? finalHost : $"pawfeeds-cam-{ip.Replace('.', '-')}";
-        cams.TryAdd(key, (finalHost == string.Empty ? key : finalHost, ip));
-    }
-    else if (type == "feeder")
-    {
-        var key = !string.IsNullOrWhiteSpace(finalHost) ? finalHost : $"pawfeeds-std-{ip.Replace('.', '-')}";
-        stds.TryAdd(key, (finalHost == string.Empty ? key : finalHost, ip, weight));
-    }
-    else
-    {
-        // Unknown, default classification
-        if (finalHost.StartsWith("pawfeeds-std-"))
-        {
-            stds.TryAdd(finalHost, (finalHost, ip, weight));
-        }
-        else
-        {
-            var key = string.IsNullOrWhiteSpace(finalHost) ? $"pawfeeds-cam-{ip.Replace('.', '-')}" : finalHost;
-            cams.TryAdd(key, (key, ip));
-        }
-    }
-}
-
-
-        private static void TryParseHello(string text, out string? hostname, out string? type)
-        {
-            hostname = null; type = null;
-            try
-            {
-                using var doc = JsonDocument.Parse(text);
-                var root = doc.RootElement;
-                hostname = TryGetString(root, "hostname") ?? TryGetString(root, "host") ?? TryGetString(root, "name");
-                type = TryGetString(root, "type") ?? TryGetString(root, "device") ?? TryGetString(root, "role");
-            }
-            catch
-            {
-                // non-JSON or malformed; ignore
-            }
-        }
-
-        private static void TryParseStatus(string text, out string? hostname, out string? type, out double? weight)
-        {
-            hostname = null; type = null; weight = null;
-            try
-            {
-                using var doc = JsonDocument.Parse(text);
-                var root = doc.RootElement;
-                hostname = TryGetString(root, "hostname") ?? TryGetString(root, "host") ?? TryGetString(root, "name");
-                type = TryGetString(root, "type") ?? TryGetString(root, "device") ?? TryGetString(root, "role");
-
-                if (TryGetNumber(root, "container_weight_grams", out var w) ||
-                    TryGetNumber(root, "containerWeightGrams", out w) ||
-                    TryGetNumber(root, "weight", out w))
+                catch (OperationCanceledException)
                 {
-                    weight = w;
+                    Debug.WriteLine($"[LanDiscoveryService] Scan to {ip} was cancelled.");
                 }
-            }
-            catch
-            {
-                // ignore parse errors
-            }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[LanDiscoveryService] Error scanning {ip}: {ex.Message}");
+                }
+                finally
+                {
+                    sem.Release();
+                }
+            }, ct));
         }
 
-        private static string? TryGetString(JsonElement el, string key)
+        await Task.WhenAll(tasks);
+        if (ct.IsCancellationRequested) return new();
+
+        var cameras = discoveredDevices.Where(d => d.Mode == "camera-sta" && d.Hostname.StartsWith("pawfeeds-cam-")).ToList();
+        var feeders = discoveredDevices.Where(d => d.Mode == "sta" && d.Hostname.StartsWith("pawfeeds-std-")).ToList();
+        var results = new List<DeviceStatus>();
+
+        foreach (var feederBrain in feeders)
         {
-            if (el.ValueKind == JsonValueKind.Object && el.TryGetProperty(key, out var v))
+            string customName = feederBrain.Hostname.Substring("pawfeeds-std-".Length);
+
+            var cam1 = cameras.FirstOrDefault(c => c.Hostname == $"pawfeeds-cam-{customName}");
+            if (cam1.Hostname != null)
             {
-                if (v.ValueKind == JsonValueKind.String) return v.GetString();
+                // --- START MODIFICATION ---
+                // We now include the feeder's container weight when creating the final device object
+                results.Add(new DeviceStatus(
+                    DisplayName: $"Feeder 1 ({customName})",
+                    Hostname: cam1.Hostname,
+                    Ip: cam1.Ip,
+                    FeederIp: feederBrain.Ip,
+                    FeederId: 1,
+                    ContainerWeight: feederBrain.Weight 
+                ));
+                // --- END MODIFICATION ---
             }
-            return null;
+
+            var cam2 = cameras.FirstOrDefault(c => c.Hostname == $"pawfeeds-cam-{customName}-2");
+            if (cam2.Hostname != null)
+            {
+                // --- START MODIFICATION ---
+                // The same weight is used for Feeder 2, as they share the same container
+                results.Add(new DeviceStatus(
+                    DisplayName: $"Feeder 2 ({customName})",
+                    Hostname: cam2.Hostname,
+                    Ip: cam2.Ip,
+                    FeederIp: feederBrain.Ip,
+                    FeederId: 2,
+                    ContainerWeight: feederBrain.Weight
+                ));
+                // --- END MODIFICATION ---
+            }
+        }
+        
+        Debug.WriteLine($"[LanDiscoveryService] Scan complete. Found {results.Count} devices.");
+        return results.OrderBy(d => d.DisplayName).ToList();
+    }
+    
+    public async Task<List<string>> ScanForAnyDeviceAsync(CancellationToken ct = default)
+    {
+        // This method remains unchanged
+        var netInfo = _serviceProvider.GetService<INetworkInfo>();
+        if (netInfo == null) return new List<string>();
+
+        var (localIp, prefix) = netInfo.GetLocalIpAndPrefix();
+        if (localIp == null || localIp.AddressFamily != AddressFamily.InterNetwork)
+            return new List<string>();
+
+        var bytes = localIp.GetAddressBytes();
+        var netPrefix = new byte[] { bytes[0], bytes[1], bytes[2], 0 };
+        
+        var discoveredIps = new ConcurrentBag<string>();
+        var tasks = new List<Task>();
+        using var sem = new SemaphoreSlim(32);
+        using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+
+        for (int host = 1; host <= 254; host++)
+        {
+            var ip = new IPAddress(new byte[] { netPrefix[0], netPrefix[1], netPrefix[2], (byte)host }).ToString();
+            if (ip == localIp.ToString()) continue;
+
+            await sem.WaitAsync(ct);
+            tasks.Add(Task.Run(async () =>
+            {
+                try
+                {
+                    var url = $"http://{ip}/status";
+                    using var resp = await httpClient.GetAsync(url, ct);
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        discoveredIps.Add(ip);
+                    }
+                }
+                catch { /* ignore timeouts and other errors */ }
+                finally { sem.Release(); }
+            }, ct));
         }
 
-        private static bool TryGetNumber(JsonElement el, string key, out double value)
-        {
-            value = 0;
-            if (el.ValueKind == JsonValueKind.Object && el.TryGetProperty(key, out var v))
-            {
-                if (v.ValueKind == JsonValueKind.Number)
-                {
-                    return v.TryGetDouble(out value);
-                }
-                if (v.ValueKind == JsonValueKind.String && double.TryParse(v.GetString(), out value))
-                {
-                    return true;
-                }
-            }
-            return false;
-        }
+        await Task.WhenAll(tasks);
+        return discoveredIps.OrderBy(ip => ip).ToList();
     }
 }

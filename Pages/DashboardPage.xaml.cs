@@ -7,9 +7,7 @@ using System.Diagnostics;
 using Microsoft.Maui.Handlers;
 using System.Linq;
 using System;
-using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
+using System.Text.Json; // Added for JSON parsing
 
 namespace PawfeedsProvisioner.Pages;
 
@@ -28,7 +26,6 @@ public partial class DashboardPage : ContentPage
     private readonly ProfileService _profileService;
     private readonly ProvisioningClient _provisioningClient;
     private readonly CloudFunctionService _cloudFunctionService;
-    private readonly FirestoreService _firestoreService;
 
     public ObservableCollection<FeederViewModel> Feeders { get; set; }
 
@@ -41,7 +38,7 @@ public partial class DashboardPage : ContentPage
             if (_currentFeeder != value)
             {
                 _currentFeeder = value;
-
+                
                 foreach (var feeder in Feeders)
                 {
                     feeder.IsSelected = (feeder == _currentFeeder);
@@ -57,16 +54,12 @@ public partial class DashboardPage : ContentPage
                     {
                         newProfileSelection = new PetProfileViewModel { Name = "Default Profile" };
                         _currentFeeder.Profiles.Add(newProfileSelection);
-                        _ = SaveAndSyncCurrentFeederAsync();
+                        SaveAllFeeders();
                     }
                 }
-
+                
                 CurrentProfile = newProfileSelection ?? new PetProfileViewModel();
                 UpdateStreamUrl();
-
-                _statusPollingTimer?.Change(Timeout.Infinite, 0);
-                _statusPollingTimer?.Dispose();
-                _statusPollingTimer = new Timer(PollFeederStatus, null, TimeSpan.Zero, TimeSpan.FromSeconds(5));
             }
         }
     }
@@ -102,7 +95,7 @@ public partial class DashboardPage : ContentPage
                             schedule.PropertyChanged += OnSchedulePropertyChanged;
                     }
                 }
-
+                
                 OnPropertyChanged(nameof(CurrentProfile));
                 OnPropertyChanged(nameof(Schedules));
                 UpdateSchedulesVisibility();
@@ -114,27 +107,24 @@ public partial class DashboardPage : ContentPage
     public ObservableCollection<DayOfWeekViewModel> DaysOfWeek { get; set; }
     private FeedingSchedule? _currentlyEditingSchedule;
     private bool _isFeeding = false;
-
+    
+    // --- START MODIFICATION ---
     private Timer? _statusPollingTimer;
     private readonly HttpClient _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+    // --- END MODIFICATION ---
 
     #endregion
 
-    public DashboardPage(
-        ProfileService profileService,
-        ProvisioningClient provisioningClient,
-        CloudFunctionService cloudFunctionService,
-        FirestoreService firestoreService)
+    public DashboardPage(ProfileService profileService, ProvisioningClient provisioningClient, CloudFunctionService cloudFunctionService)
     {
         InitializeComponent();
         _profileService = profileService;
         _provisioningClient = provisioningClient;
         _cloudFunctionService = cloudFunctionService;
-        _firestoreService = firestoreService;
-
+        
         Feeders = new ObservableCollection<FeederViewModel>(_profileService.LoadFeeders());
         this.BindingContext = this;
-
+        
         DaysOfWeek = new ObservableCollection<DayOfWeekViewModel>
         {
             new(DayOfWeek.Sunday, "S"), new(DayOfWeek.Monday, "M"), new(DayOfWeek.Tuesday, "T"),
@@ -142,14 +132,13 @@ public partial class DashboardPage : ContentPage
             new(DayOfWeek.Friday, "F"), new(DayOfWeek.Saturday, "S")
         };
     }
-
-    protected override async void OnAppearing()
+    
+    protected override void OnAppearing()
     {
         base.OnAppearing();
-
+        
         string cameraIp = Uri.UnescapeDataString(CameraIp ?? string.Empty);
         string feederIp = Uri.UnescapeDataString(FeederIp ?? string.Empty);
-        string deviceId = Uri.UnescapeDataString(DeviceId ?? string.Empty);
 
         FeederViewModel? targetFeeder = Feeders.FirstOrDefault(f => f.Id == FeederId);
 
@@ -157,78 +146,75 @@ public partial class DashboardPage : ContentPage
         {
             targetFeeder.CameraIp = cameraIp;
             targetFeeder.FeederIp = feederIp;
-            if (!string.IsNullOrWhiteSpace(deviceId))
-            {
-                targetFeeder.DeviceId = deviceId;
-            }
-            await SaveAndSyncCurrentFeederAsync();
+            targetFeeder.DeviceId = DeviceId;
+            SaveAllFeeders();
+        
             CurrentFeeder = targetFeeder;
         }
         else if (FeederId > 0)
         {
-            targetFeeder = new FeederViewModel
-            {
-                Id = FeederId,
-                Name = $"Feeder {FeederId}",
-                CameraIp = cameraIp,
-                FeederIp = feederIp,
-                DeviceId = deviceId
-            };
-            Feeders.Add(targetFeeder);
-            await SaveAndSyncCurrentFeederAsync();
-            CurrentFeeder = targetFeeder;
+             targetFeeder = new FeederViewModel
+             {
+                 Id = FeederId,
+                 Name = $"Feeder {FeederId}",
+                 CameraIp = cameraIp,
+                 FeederIp = feederIp,
+                 DeviceId = DeviceId
+             };
+             Feeders.Add(targetFeeder);
+             SaveAllFeeders();
+             CurrentFeeder = targetFeeder;
         }
         else if (!Feeders.Any())
         {
             var defaultFeeder = new FeederViewModel { Id = 1, Name = "Feeder 1" };
             Feeders.Add(defaultFeeder);
-            await SaveAndSyncCurrentFeederAsync();
+            SaveAllFeeders();
             CurrentFeeder = defaultFeeder;
         }
         else
         {
-            CurrentFeeder = Feeders.First();
+             CurrentFeeder = Feeders.First();
         }
+
+        // --- START MODIFICATION ---
+        // Start the timer to poll for status updates
+        _statusPollingTimer = new Timer(PollFeederStatus, null, TimeSpan.Zero, TimeSpan.FromSeconds(5));
+        // --- END MODIFICATION ---
     }
 
     protected override void OnDisappearing()
     {
         base.OnDisappearing();
         StreamWebView.Source = null;
-#if ANDROID
-        if (StreamWebView.Handler is WebViewHandler wvh && wvh.PlatformView != null)
-        {
-            wvh.PlatformView.Destroy();
-        }
-#endif
+    #if ANDROID
+        (StreamWebView.Handler as WebViewHandler)?.PlatformView?.Destroy();
+    #endif
         Debug.WriteLine("[DashboardPage] WebView stream stopped and handler cleaned up.");
 
+        // --- START MODIFICATION ---
+        // Stop the timer when the page disappears
         _statusPollingTimer?.Change(Timeout.Infinite, 0);
         _statusPollingTimer?.Dispose();
         _statusPollingTimer = null;
+        // --- END MODIFICATION ---
     }
 
     #region Event Handlers for Data Changes
-    private async Task SaveAndSyncCurrentFeederAsync()
+    private void SaveAllFeeders()
     {
         _profileService.SaveFeeders(Feeders.ToList());
-
-        if (CurrentFeeder != null && !string.IsNullOrWhiteSpace(CurrentFeeder.DeviceId))
-        {
-            await _firestoreService.SaveDeviceAsync(CurrentFeeder);
-            await _firestoreService.SaveFeederAsync(CurrentFeeder);
-        }
     }
 
     private void OnProfilePropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        _ = SaveAndSyncCurrentFeederAsync();
+        SaveAllFeeders();
     }
 
     private void OnSchedulePropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         CurrentProfile?.RecalculateFeedingAmount();
-        _ = SaveAndSyncCurrentFeederAsync();
+        SaveAllFeeders();
     }
 
     private void OnSchedulesCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
@@ -245,10 +231,10 @@ public partial class DashboardPage : ContentPage
         }
         CurrentProfile?.RecalculateFeedingAmount();
         UpdateSchedulesVisibility();
-        _ = SaveAndSyncCurrentFeederAsync();
+        SaveAllFeeders();
     }
     #endregion
-
+    
     private void OnFeederButtonClicked(object sender, EventArgs e)
     {
         if ((sender as Button)?.BindingContext is FeederViewModel selectedFeeder)
@@ -261,7 +247,7 @@ public partial class DashboardPage : ContentPage
     private void UpdateStreamUrl()
     {
         string? ipAddress = CurrentFeeder?.CameraIp;
-
+        
         if (!string.IsNullOrEmpty(ipAddress) && ipAddress != "N/A")
         {
             string url = $"http://{ipAddress}/stream";
@@ -272,17 +258,15 @@ public partial class DashboardPage : ContentPage
             StreamWebView.Source = new UrlWebViewSource { Url = "about:blank" };
         }
 
-        UpdateFeederStatusText();
+        UpdateFeederStatus();
     }
 
+    // --- START MODIFICATION ---
+    // This new method periodically fetches the status and updates the CurrentFeeder's weight
     private async void PollFeederStatus(object? state)
     {
         if (CurrentFeeder == null || string.IsNullOrWhiteSpace(CurrentFeeder.FeederIp) || CurrentFeeder.FeederIp == "N/A")
         {
-            if (CurrentFeeder != null)
-            {
-                MainThread.BeginInvokeOnMainThread(() => { CurrentFeeder.IsOnline = false; });
-            }
             return;
         }
 
@@ -298,27 +282,25 @@ public partial class DashboardPage : ContentPage
                 MainThread.BeginInvokeOnMainThread(() =>
                 {
                     CurrentFeeder.ContainerWeight = weight;
-                    CurrentFeeder.IsOnline = true;
                 });
-                _ = SaveAndSyncCurrentFeederAsync();
             }
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[DashboardPage] Failed to poll status from {CurrentFeeder.FeederIp}: {ex.Message}");
-            MainThread.BeginInvokeOnMainThread(() =>
-            {
-                if (CurrentFeeder != null) CurrentFeeder.IsOnline = false;
-            });
         }
     }
+    // --- END MODIFICATION ---
 
-    private void UpdateFeederStatusText()
+    private void UpdateFeederStatus()
     {
         string camIp = CurrentFeeder?.CameraIp ?? "N/A";
         string feederIp = CurrentFeeder?.FeederIp ?? "N/A";
-        string deviceId = CurrentFeeder?.DeviceId ?? "N/A";
-        IpAddressLabel.Text = $"Camera: {camIp} | Feeder: {feederIp} | Device ID: {deviceId}";
+        IpAddressLabel.Text = $"Camera: {camIp} | Feeder: {feederIp}";
+
+        bool canFeed = !string.IsNullOrWhiteSpace(CurrentFeeder?.DeviceId) && !_isFeeding;
+        FeedNowBtn.IsEnabled = canFeed;
+        FeedNowBtn.Text = "FEED NOW";
     }
 
     private void UpdateSchedulesVisibility()
@@ -328,7 +310,7 @@ public partial class DashboardPage : ContentPage
         NoSchedulesLabel.IsVisible = !hasSchedules;
     }
     #endregion
-
+    
     #region Profile Management
     private async void OnAddProfileClicked(object sender, EventArgs e)
     {
@@ -341,20 +323,20 @@ public partial class DashboardPage : ContentPage
             CurrentFeeder.Profiles.Add(newProfile);
             CurrentProfile = newProfile;
             ProfilePicker.SelectedItem = newProfile;
-            await SaveAndSyncCurrentFeederAsync();
+            SaveAllFeeders();
         }
     }
 
     private async void OnRenameProfileClicked(object sender, EventArgs e)
     {
         if (CurrentProfile == null) return;
-
+        
         string newName = await DisplayPromptAsync("Rename Profile", "Enter the new name for this profile:", initialValue: CurrentProfile.Name);
         if (!string.IsNullOrWhiteSpace(newName))
         {
             CurrentProfile.Name = newName;
-            await SaveAndSyncCurrentFeederAsync();
-
+            SaveAllFeeders();
+            
             var currentSelection = ProfilePicker.SelectedItem;
             ProfilePicker.ItemsSource = null;
             ProfilePicker.ItemsSource = CurrentFeeder.Profiles;
@@ -366,20 +348,12 @@ public partial class DashboardPage : ContentPage
     #region Actions (Feed Now)
     private async void OnFeedNowClicked(object sender, EventArgs e)
     {
-        if (_isFeeding) return;
-
-        if (CurrentFeeder == null || CurrentProfile == null)
+        if (_isFeeding || CurrentFeeder == null || CurrentProfile == null || string.IsNullOrWhiteSpace(CurrentFeeder.DeviceId))
         {
-            await DisplayAlert("Error", "No feeder or profile selected.", "OK");
+            await DisplayAlert("Error", "No unique Device ID found for this feeder.", "OK");
             return;
         }
-
-        if (string.IsNullOrWhiteSpace(CurrentFeeder.DeviceId))
-        {
-            await DisplayAlert("Error", "No unique Device ID found for this feeder. Please re-provision the device.", "OK");
-            return;
-        }
-
+        
         int portion = CurrentProfile.EditedCalculation;
         if (portion <= 0)
         {
@@ -393,11 +367,11 @@ public partial class DashboardPage : ContentPage
         try
         {
             _isFeeding = true;
-            FeedNowBtn.IsEnabled = false;
+            UpdateFeederStatus();
             FeedNowBtn.Text = "Sending...";
 
-            var commandPayload = new { type = "FEED", feeder = CurrentFeeder.Id, grams = portion };
-
+            var commandPayload = new { type = "FEED", portion };
+            
             var result = await _cloudFunctionService.SendCommandAsync(CurrentFeeder.DeviceId, commandPayload);
 
             if (result.Success)
@@ -416,11 +390,7 @@ public partial class DashboardPage : ContentPage
         finally
         {
             _isFeeding = false;
-            FeedNowBtn.Text = "FEED NOW";
-            if (CurrentFeeder != null)
-            {
-                FeedNowBtn.IsEnabled = CurrentFeeder.IsOnline;
-            }
+            UpdateFeederStatus();
         }
     }
     #endregion
@@ -440,7 +410,7 @@ public partial class DashboardPage : ContentPage
         if (Application.Current?.Resources.TryGetValue("BoolToColorConverter", out var converterResource) is not true ||
             converterResource is not BoolToColorConverter converter)
         {
-            return;
+            return; // Converter not found, cannot proceed
         }
 
         foreach (var dayVM in DaysOfWeek)
@@ -453,7 +423,7 @@ public partial class DashboardPage : ContentPage
 
             button.SetBinding(Button.TextProperty, nameof(DayOfWeekViewModel.Name));
             button.SetBinding(Button.BackgroundColorProperty, new Binding(nameof(DayOfWeekViewModel.IsSelected), converter: converter));
-
+            
             button.Clicked += OnDayToggled;
             DaysOfWeekLayout.Children.Add(button);
         }
@@ -485,7 +455,7 @@ public partial class DashboardPage : ContentPage
         {
             dayVM.IsSelected = scheduleToEdit.Days.Contains(dayVM.Day);
         }
-
+        
         RenderDayOfWeekButtons();
         ShowPopup(true);
     }
@@ -536,7 +506,7 @@ public partial class DashboardPage : ContentPage
     }
 
     private void OnCancelScheduleClicked(object sender, EventArgs e) => ShowPopup(false);
-
+    
     private void OnDayToggled(object? sender, EventArgs e)
     {
         if ((sender as Button)?.BindingContext is DayOfWeekViewModel dayVM)

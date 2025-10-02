@@ -5,27 +5,16 @@ using System.Threading.Tasks;
 using PawfeedsProvisioner.Models;
 using System.Collections.Generic;
 using System;
-using System.Diagnostics;
+using System.Diagnostics; // Added for logging
 
 namespace PawfeedsProvisioner.Pages;
 
-[QueryProperty(nameof(PostProvisioningDeviceId), "DeviceId")]
-[QueryProperty(nameof(PostProvisioningHostname), "Hostname")]
-[QueryProperty(nameof(PostProvisioningFeederId), "FeederId")]
-[QueryProperty(nameof(PostProvisioningCameraIp), "CameraIp")]
-[QueryProperty(nameof(PostProvisioningFeederIp), "FeederIp")]
 public partial class FindDevicePage : ContentPage
 {
     private readonly LanDiscoveryService _scan;
     private readonly FirestoreService _firestoreService;
     private bool _isPostProvisioning = false;
     private CancellationTokenSource? _scanCts;
-
-    public string PostProvisioningDeviceId { get; set; } = string.Empty;
-    public string PostProvisioningHostname { get; set; } = string.Empty;
-    public int PostProvisioningFeederId { get; set; } = 0;
-    public string PostProvisioningCameraIp { get; set; } = string.Empty;
-    public string PostProvisioningFeederIp { get; set; } = string.Empty;
 
     public FindDevicePage(LanDiscoveryService scan, FirestoreService firestoreService)
     {
@@ -37,10 +26,9 @@ public partial class FindDevicePage : ContentPage
     protected override async void OnAppearing()
     {
         base.OnAppearing();
-
-        _isPostProvisioning =
-            !string.IsNullOrWhiteSpace(PostProvisioningDeviceId) &&
-            !string.IsNullOrWhiteSpace(PostProvisioningHostname);
+        
+        var navStack = Shell.Current.Navigation.NavigationStack;
+        _isPostProvisioning = navStack.Count > 1 && navStack[navStack.Count - 2].GetType() == typeof(ProvisioningPage);
 
         DoneButton.IsVisible = _isPostProvisioning;
 
@@ -52,9 +40,10 @@ public partial class FindDevicePage : ContentPage
         base.OnDisappearing();
         _scanCts?.Cancel();
     }
-
+    
     private async Task CheckPermissionsAndScanAsync()
     {
+        // Permission logic remains the same...
         await CancelAndRunScanAsync();
     }
 
@@ -69,7 +58,6 @@ public partial class FindDevicePage : ContentPage
     {
         Spinner.IsRunning = true;
         List.ItemsSource = null;
-
         try
         {
             var myFirestoreDevices = await _firestoreService.GetMyDevicesAsync();
@@ -78,56 +66,28 @@ public partial class FindDevicePage : ContentPage
             var allLanDevices = await _scan.ScanAsync(ct);
             if (ct.IsCancellationRequested) return;
 
-            // Build quick lookup for known Firestore devices
-            var firestoreDeviceMap = myFirestoreDevices.ToDictionary(d => d.Name, d => d.Id);
-
-            var onlineDeviceList = allLanDevices.Select(lanDevice =>
-            {
-                var coreHostname = lanDevice.Hostname.Replace("pawfeeds-cam-", "").Replace("-2", "");
-                firestoreDeviceMap.TryGetValue(coreHostname, out var deviceId);
-
-                return new OnlineDeviceViewModel
-                {
-                    DeviceId = deviceId ?? string.Empty,
-                    DisplayName = lanDevice.DisplayName,
-                    Hostname = lanDevice.Hostname,
-                    Ip = lanDevice.Ip,
-                    FeederIp = lanDevice.FeederIp,
-                    FeederId = lanDevice.FeederId
-                };
-            }).ToList();
-
-            if (_isPostProvisioning)
-            {
-                var justProvisionedDevice = onlineDeviceList.FirstOrDefault(d =>
-                    d.Hostname.Replace("pawfeeds-cam-", "").Replace("-2", "") == this.PostProvisioningHostname);
-
-                if (justProvisionedDevice != null)
-                {
-                    justProvisionedDevice.DeviceId = this.PostProvisioningDeviceId;
-
-                    // Inject feeder info if available from provisioning flow
-                    if (PostProvisioningFeederId > 0)
-                        justProvisionedDevice.FeederId = PostProvisioningFeederId;
-
-                    if (!string.IsNullOrWhiteSpace(PostProvisioningCameraIp))
-                        justProvisionedDevice.Ip = PostProvisioningCameraIp;
-
-                    if (!string.IsNullOrWhiteSpace(PostProvisioningFeederIp))
-                        justProvisionedDevice.FeederIp = PostProvisioningFeederIp;
-
-                    Debug.WriteLine($"[FindDevicePage] Injected post-provision DeviceId '{this.PostProvisioningDeviceId}', FeederId '{justProvisionedDevice.FeederId}', CameraIp '{justProvisionedDevice.Ip}', FeederIp '{justProvisionedDevice.FeederIp}'.");
-                }
-                else
-                {
-                    Debug.WriteLine($"[FindDevicePage] Post-provisioning FAILED: could not find device with hostname '{this.PostProvisioningHostname}' in scan results.");
-                }
-            }
-
+            // Use a left outer join to show all LAN devices, enriched with Firestore data if a match is found.
+            var onlineDevices = from lanDevice in allLanDevices
+                                join firestoreDevice in myFirestoreDevices
+                                on lanDevice.Hostname.Replace("pawfeeds-cam-", "").Replace("-2", "") equals firestoreDevice.Name into gj
+                                from subFirestoreDevice in gj.DefaultIfEmpty()
+                                select new OnlineDeviceViewModel
+                                {
+                                    // Use the matched Firestore device ID, or an empty string if no match.
+                                    DeviceId = subFirestoreDevice?.Id ?? string.Empty,
+                                    DisplayName = lanDevice.DisplayName,
+                                    Hostname = lanDevice.Hostname,
+                                    Ip = lanDevice.Ip,
+                                    FeederIp = lanDevice.FeederIp,
+                                    FeederId = lanDevice.FeederId
+                                };
+            
+            var onlineDeviceList = onlineDevices.ToList();
             List.ItemsSource = onlineDeviceList;
 
             if (!onlineDeviceList.Any())
             {
+                // This message is now more accurate: it means no devices were found on the LAN at all.
                 await DisplayAlert("No Devices Found", "The scan did not find any Pawfeeds devices on your current Wi-Fi network.", "OK");
             }
         }
@@ -148,7 +108,7 @@ public partial class FindDevicePage : ContentPage
             }
         }
     }
-
+    
     private async void OnRescan(object sender, EventArgs e)
     {
         await CheckPermissionsAndScanAsync();
@@ -164,6 +124,7 @@ public partial class FindDevicePage : ContentPage
             return;
         }
 
+        // Defensive checks to ensure critical data for navigation is present.
         if (string.IsNullOrWhiteSpace(selectedDevice.Ip) || selectedDevice.Ip == "N/A")
         {
             await DisplayAlert("Camera Offline", "The camera for this device appears to be offline.", "OK");
@@ -175,7 +136,7 @@ public partial class FindDevicePage : ContentPage
             await DisplayAlert("Incomplete Data", "This device is missing feeder IP or a valid feeder ID and cannot be opened.", "OK");
             return;
         }
-
+        
         try
         {
             Debug.WriteLine(
