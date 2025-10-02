@@ -27,6 +27,7 @@ public partial class DashboardPage : ContentPage
     private readonly ProfileService _profileService;
     private readonly ProvisioningClient _provisioningClient;
     private readonly CloudFunctionService _cloudFunctionService;
+    private readonly SchedulingService _schedulingService;
 
     public ObservableCollection<FeederViewModel> Feeders { get; set; }
 
@@ -114,12 +115,13 @@ public partial class DashboardPage : ContentPage
 
     #endregion
 
-    public DashboardPage(ProfileService profileService, ProvisioningClient provisioningClient, CloudFunctionService cloudFunctionService)
+    public DashboardPage(ProfileService profileService, ProvisioningClient provisioningClient, CloudFunctionService cloudFunctionService, SchedulingService schedulingService)
     {
         InitializeComponent();
         _profileService = profileService;
         _provisioningClient = provisioningClient;
         _cloudFunctionService = cloudFunctionService;
+        _schedulingService = schedulingService;
         
         // This line is updated to fix the compiler error
         Feeders = new ObservableCollection<FeederViewModel>(_profileService.GetFeeders());
@@ -560,6 +562,15 @@ public partial class DashboardPage : ContentPage
             CurrentProfile.Schedules.Add(newSchedule);
         }
         ShowPopup(false);
+        
+        try
+        {
+            await _schedulingService.RunOnceNowAsync();
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[DashboardPage] Failed to trigger scheduling check: {ex.Message}");
+        }
     }
 
     private void OnCancelScheduleClicked(object sender, EventArgs e) => ShowPopup(false);

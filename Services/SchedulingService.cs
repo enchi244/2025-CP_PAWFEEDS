@@ -1,6 +1,8 @@
 using System.Diagnostics;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using PawfeedsProvisioner.Models;
 
 namespace PawfeedsProvisioner.Services
@@ -10,6 +12,7 @@ namespace PawfeedsProvisioner.Services
         private readonly ProfileService _profileService;
         private readonly CloudFunctionService _cloudFunctionService;
         private readonly HttpClient _httpClient;
+        private readonly SemaphoreSlim _checkLock = new(1, 1);
         private Timer? _timer;
 
         public SchedulingService(ProfileService profileService, CloudFunctionService cloudFunctionService)
@@ -21,56 +24,75 @@ namespace PawfeedsProvisioner.Services
 
         public void Start()
         {
-            _timer = new Timer(async _ => await CheckSchedulesAsync(), null, TimeSpan.Zero, TimeSpan.FromSeconds(10));
+            Stop();
+            _timer = new Timer(async _ => await CheckSchedulesInternalAsync(waitForLock: false), null, TimeSpan.Zero, TimeSpan.FromSeconds(10));
             Debug.WriteLine("[SchedulingService] Started");
         }
 
         public void Stop()
         {
             _timer?.Change(Timeout.Infinite, 0);
+            _timer?.Dispose();
+            _timer = null;
             Debug.WriteLine("[SchedulingService] Stopped");
         }
 
-        private async Task CheckSchedulesAsync()
+        public Task RunOnceNowAsync() => CheckSchedulesInternalAsync(waitForLock: true);
+
+        private async Task CheckSchedulesInternalAsync(bool waitForLock)
         {
+            bool lockTaken = false;
+
             try
             {
+                if (waitForLock)
+                {
+                    await _checkLock.WaitAsync();
+                    lockTaken = true;
+                }
+                else
+                {
+                    if (!await _checkLock.WaitAsync(0))
+                    {
+                        return;
+                    }
+
+                    lockTaken = true;
+                }
                 var now = DateTime.Now;
-                // This line is updated to fix the compiler error
                 var feeders = _profileService.GetFeeders();
                 var tasksToRun = new List<Task>();
 
-                if (feeders == null) return;
+                if (feeders == null || feeders.Count == 0)
+                {
+                    return;
+                }
 
                 foreach (var feeder in feeders)
                 {
-                    if (feeder.Profiles == null) continue;
+                    if (feeder?.Profiles == null || feeder.Profiles.Count == 0)
+                        continue;
 
                     foreach (var profile in feeder.Profiles)
                     {
-                        if (profile.Schedules == null) continue;
+                        if (profile?.Schedules == null || profile.Schedules.Count == 0)
+                            continue;
 
                         foreach (var schedule in profile.Schedules)
                         {
-                            bool isDue = schedule.IsEnabled &&
-                                         schedule.Days.Contains(now.DayOfWeek) &&
-                                         now.TimeOfDay >= schedule.Time &&
-                                         schedule.LastTriggered.Date < now.Date;
+                            if (!IsScheduleDue(schedule, now, out var scheduledDateTime))
+                                continue;
 
-                            if (isDue)
+                            schedule.LastTriggered = scheduledDateTime;
+                            Debug.WriteLine($"[SchedulingService] Schedule '{schedule.Name}' for feeder '{feeder.Name}' is due at {scheduledDateTime:t}.");
+
+                            int portion = profile.EditedCalculation;
+                            if (portion <= 0)
                             {
-                                schedule.LastTriggered = now;
-                                Debug.WriteLine($"[SchedulingService] Schedule '{schedule.Name}' for feeder '{feeder.Name}' is due.");
-
-                                int portion = profile.EditedCalculation;
-                                if (portion <= 0)
-                                {
-                                    Debug.WriteLine($"[SchedulingService] Portion for '{schedule.Name}' is 0, skipping.");
-                                    continue;
-                                }
-                                
-                                tasksToRun.Add(TriggerFeedAsync(feeder, portion, schedule.Name));
+                                Debug.WriteLine($"[SchedulingService] Portion for '{schedule.Name}' is 0, skipping.");
+                                continue;
                             }
+                            tasksToRun.Add(TriggerFeedAsync(feeder, portion, schedule.Name));
                         }
                     }
                 }
@@ -85,6 +107,51 @@ namespace PawfeedsProvisioner.Services
             {
                 Debug.WriteLine($"[SchedulingService] Error checking schedules: {ex.Message}");
             }
+            finally
+            {
+                if (lockTaken)
+                {
+                    _checkLock.Release();
+                }
+            }
+        }
+
+        private static bool IsScheduleDue(FeedingSchedule schedule, DateTime now, out DateTime scheduledDateTime)
+        {
+            scheduledDateTime = now.Date.Add(schedule.Time);
+
+            if (schedule == null)
+            {
+                return false;
+            }
+
+            if (!schedule.IsEnabled)
+            {
+                return false;
+            }
+
+            bool runsToday = schedule.Days == null || schedule.Days.Count == 0 || schedule.Days.Contains(now.DayOfWeek);
+            if (!runsToday)
+            {
+                return false;
+            }
+
+            if (now < scheduledDateTime)
+            {
+                return false;
+            }
+
+            if (schedule.LastTriggered == DateTime.MinValue)
+            {
+                return true;
+            }
+
+            if (schedule.LastTriggered.Date < now.Date)
+            {
+                return true;
+            }
+
+            return schedule.LastTriggered < scheduledDateTime;
         }
         
         private async Task TriggerFeedAsync(FeederViewModel feeder, int portion, string scheduleName)
