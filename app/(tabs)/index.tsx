@@ -38,6 +38,11 @@ const COLORS = {
 const { width } = Dimensions.get('window');
 const CARD_WIDTH = width - 40;
 
+// ====================================================================================
+// === CONFIGURATION: Update this value to match your container's max capacity in grams ===
+// ====================================================================================
+const MAX_CONTAINER_CAPACITY_GRAMS = 1000; // 1kg container
+
 // --- Interfaces for our data models ---
 interface Pet {
     id: string;
@@ -105,9 +110,6 @@ const BowlCard: React.FC<BowlCardProps> = ({ bowlNumber, selectedPet, foodLevel,
             }
             setShowBuffering(false);
         } else {
-            // ** THE FIX **
-            // We only show the buffering indicator if the video is buffering AND not playing.
-            // Once it starts playing, we hide the indicator, even if it buffers in the background.
             const isActuallyBuffering = status.isBuffering && !status.isPlaying;
             setShowBuffering(isActuallyBuffering);
         }
@@ -201,8 +203,9 @@ export default function DashboardScreen() {
 
   const [feederId, setFeederId] = useState<string | null>(null);
   const [streamUris, setStreamUris] = useState<{ [bowlId: string]: string | null }>({});
+  const [containerWeight, setContainerWeight] = useState<number>(0);
 
-  const bowlsConfig = [{ id: 1, foodLevel: 85 }, { id: 2, foodLevel: 60 }];
+  const bowlsConfig = [{ id: 1 }, { id: 2 }];
 
   useEffect(() => {
     if (!user) {
@@ -220,6 +223,17 @@ export default function DashboardScreen() {
       if (!querySnapshot.empty) {
         const currentFeederId = querySnapshot.docs[0].id;
         setFeederId(currentFeederId);
+
+        // --- Real-time listener for feeder document (for container_weight) ---
+        const feederDocRef = doc(db, 'feeders', currentFeederId);
+        const feederUnsub = onSnapshot(feederDocRef, (doc) => {
+            if (doc.exists()) {
+                const data = doc.data();
+                setContainerWeight(data.container_weight || 0);
+            }
+        });
+        unsubscribes.push(feederUnsub);
+
 
         const relayServerIp = '192.168.1.5';
         const relayServerPort = 8080;
@@ -261,6 +275,13 @@ export default function DashboardScreen() {
 
     return () => unsubscribes.forEach(unsub => unsub());
   }, [user]);
+
+  const foodLevelPercentage = useMemo(() => {
+    if (containerWeight <= 0) return 0;
+    const percentage = (containerWeight / MAX_CONTAINER_CAPACITY_GRAMS) * 100;
+    return Math.min(100, Math.round(percentage)); // Ensure it doesn't go over 100%
+  }, [containerWeight]);
+
 
   const petsByBowl = useMemo(() => {
     const bowlMap: { [bowlId: string]: Pet[] } = {};
@@ -479,7 +500,7 @@ export default function DashboardScreen() {
                         key={bowl.id}
                         bowlNumber={bowl.id}
                         selectedPet={selectedPet}
-                        foodLevel={bowl.foodLevel}
+                        foodLevel={foodLevelPercentage}
                         perMealPortion={perMealPortion}
                         onPressFeed={() => handleOpenFeedModal(bowl.id)}
                         onPressFilter={() => handleOpenFilterModal(bowl.id)}
