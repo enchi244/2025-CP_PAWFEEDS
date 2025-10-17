@@ -1,0 +1,86 @@
+const express = require('express');
+const http = require('http');
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+
+const PORT = process.env.PORT || 8080;
+// --- IMPORTANT: CONFIGURE YOUR CAMERA IPs HERE ---
+const CAMERA_IPS = {
+  1: 'http://192.168.1.183', // IP for Bowl 1 Camera
+  2: 'http://192.168.1.187', // IP for Bowl 2 Camera
+};
+// ------------------------------------------------
+
+const app = express();
+const server = http.createServer(app);
+
+console.log(`[PawFeeds Relay] Server is starting...`);
+
+app.get('/stream/:bowlNumber', async (req, res) => {
+  const { bowlNumber } = req.params;
+  const cameraIp = CAMERA_IPS[bowlNumber];
+
+  if (!cameraIp) {
+    console.error(`[Relay] HTTP: No camera configured for bowl number: ${bowlNumber}`);
+    return res.status(404).send(`Camera for bowl ${bowlNumber} not found.`);
+  }
+
+  const streamUrl = `${cameraIp}/stream`;
+  console.log(`[Relay] HTTP: Client connected for Bowl ${bowlNumber}. Attempting to relay from: ${streamUrl}`);
+
+  try {
+    const cameraResponse = await fetch(streamUrl);
+
+    if (!cameraResponse.ok) {
+      throw new Error(`Camera responded with status: ${cameraResponse.status}`);
+    }
+    
+    // +++ FIX: Dynamically forward the exact Content-Type header from the camera +++
+    const contentType = cameraResponse.headers.get('content-type');
+    if (!contentType || !contentType.startsWith('multipart/x-mixed-replace')) {
+        console.error(`[Relay] ERROR: Camera for Bowl ${bowlNumber} sent an unexpected Content-Type: ${contentType}`);
+        throw new Error(`Unexpected Content-Type from camera: ${contentType}`);
+    }
+    
+    console.log(`[Relay] Got stream from Bowl ${bowlNumber}. Forwarding with Content-Type: ${contentType}`);
+    res.writeHead(200, {
+      'Content-Type': contentType, // Pass the original header, which includes the correct boundary
+      'Connection': 'keep-alive',
+      'Cache-Control': 'no-cache, no-store, private',
+      'Pragma': 'no-cache',
+      'Expires': 0,
+    });
+
+    // +++ ADDED: Detailed logging for the first chunk of data +++
+    let isFirstChunk = true;
+    cameraResponse.body.on('data', (chunk) => {
+      if (isFirstChunk) {
+        console.log(`[Relay] First chunk received from Bowl ${bowlNumber} (first 100 bytes):`);
+        console.log(chunk.slice(0, 100).toString('utf-8'));
+        isFirstChunk = false;
+      }
+    });
+    // --- End of added logging ---
+
+    // Pipe the raw stream data from the camera directly to the client
+    cameraResponse.body.pipe(res);
+
+    cameraResponse.body.on('error', (error) => {
+      console.error(`[Relay] Error in camera stream for Bowl ${bowlNumber}:`, error.message);
+      res.end();
+    });
+
+    // Handle client disconnect
+    req.on('close', () => {
+        console.log(`[Relay] HTTP: Client for Bowl ${bowlNumber} disconnected. Tearing down camera connection.`);
+        cameraResponse.body.destroy();
+    });
+    
+  } catch (error) {
+    console.error(`[Relay] HTTP: Failed to establish connection to camera for Bowl ${bowlNumber}:`, error.message);
+    res.status(500).send(`Failed to connect to stream for Bowl ${bowlNumber}.`);
+  }
+});
+
+server.listen(PORT, () => {
+  console.log(`[PawFeeds Relay] Server listening on port ${PORT}`);
+});
