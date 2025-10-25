@@ -47,15 +47,29 @@ app.get('/stream/:bowlNumber', (req, res) => {
 
   if (activeStreams.has(bowlNumber)) {
     console.log(`[Relay] Stream for bowl ${bowlNumber} is already active.`);
+    // The stream is active, so the manifest *should* exist. Respond immediately.
     return res.status(200).send(`Stream for bowl ${bowlNumber} is already active.`);
   }
 
   console.log(`[Relay] Starting HLS stream for bowl ${bowlNumber} from camera at ${cameraIp}/stream`);
   fs.ensureDirSync(outputDir);
 
-  const ffmpegProcess = ffmpeg(`${cameraIp}/stream`, { timeout: 43200 })
+  // --- We need to capture these variables for the error handler ---
+  let watcher = null; // Declare watcher here to be accessible in all scopes
+  let ffmpegProcess = null; // Declare process here
+
+  const clearWatcher = () => {
+    if (watcher) {
+      clearInterval(watcher);
+      watcher = null;
+    }
+  };
+
+  ffmpegProcess = ffmpeg(`${cameraIp}/stream`, { timeout: 43200 })
+    // --- SOLUTION 1: Specify input codec correctly ---
+    .inputOption('-c:v mjpeg')
     .addOptions([
-      '-c:v mjpeg',
+      // '-c:v mjpeg', // Removed from here
       '-hls_time 2',
       '-hls_list_size 5',
       '-hls_flags delete_segments',
@@ -69,14 +83,12 @@ app.get('/stream/:bowlNumber', (req, res) => {
     .output(manifestPath)
     .on('start', (commandLine) => {
       console.log(`[FFmpeg Bowl ${bowlNumber}] Successfully spawned.`);
-      if (!res.headersSent) {
-        res.status(200).send(`Stream initiation for bowl ${bowlNumber} successful.`);
-      }
     })
     .on('error', (err, stdout, stderr) => {
       console.error(`[FFmpeg Bowl ${bowlNumber}] FATAL ERROR: ${err.message}`);
       console.error(`[FFmpeg Bowl ${bowlNumber}] STDERR:\n${stderr}`);
       activeStreams.delete(bowlNumber);
+      clearWatcher(); // Clear the watcher on error
       if (!res.headersSent) {
         res.status(500).send('Failed to start FFmpeg process.');
       }
@@ -84,10 +96,39 @@ app.get('/stream/:bowlNumber', (req, res) => {
     .on('end', () => {
       console.log(`[FFmpeg Bowl ${bowlNumber}] Stream processing finished.`);
       activeStreams.delete(bowlNumber);
+      clearWatcher(); // Clear the watcher on end
     });
 
   ffmpegProcess.run();
   activeStreams.set(bowlNumber, ffmpegProcess);
+
+  // --- SOLUTION 2: Increase timeout to 30 seconds ---
+  const timeout = 30000; // 30 seconds
+  const interval = 100; // Check every 100ms
+  let timeElapsed = 0;
+
+  watcher = setInterval(() => {
+    if (fs.existsSync(manifestPath)) {
+      clearWatcher();
+      if (!res.headersSent) {
+        console.log(`[Relay] Manifest for bowl ${bowlNumber} created. Sending 200 OK.`);
+        res.status(200).send(`Stream initiation for bowl ${bowlNumber} successful.`);
+      }
+    } else {
+      timeElapsed += interval;
+      if (timeElapsed > timeout) {
+        clearWatcher();
+        console.error(`[Relay] Timeout: Manifest for bowl ${bowlNumber} not created after ${timeout/1000}s.`);
+        if (ffmpegProcess) {
+          ffmpegProcess.kill('SIGKILL'); // Kill the hung process
+        }
+        activeStreams.delete(bowlNumber);
+        if (!res.headersSent) {
+          res.status(500).send('FFmpeg process timed out, failed to create manifest.');
+        }
+      }
+    }
+  }, interval);
 });
 
 // --- SERVER START ---
