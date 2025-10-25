@@ -1,6 +1,6 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { collection, doc, getDoc, getDocs, onSnapshot, query, Unsubscribe, where, writeBatch } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, onSnapshot, query, Unsubscribe, updateDoc, where, writeBatch } from 'firebase/firestore';
 import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
@@ -25,6 +25,7 @@ const COLORS = {
   text: '#333333',
   lightGray: '#E0E0E0',
   white: '#FFFFFF',
+  darkGray: '#757575',
 };
 
 interface Schedule {
@@ -59,16 +60,21 @@ export default function SchedulesScreen() {
   const { user } = useAuth();
   
   const [activeFilter, setActiveFilter] = useState('All');
-
   const [feederId, setFeederId] = useState<string | null>(null);
+
+  // --- New State for Smart Scheduling ---
+  const [isSmartMode, setIsSmartMode] = useState(false);
+  const [isFeederLoading, setIsFeederLoading] = useState(true);
 
   useEffect(() => {
     if (!user) {
       setLoading(false);
+      setIsFeederLoading(false);
       return;
     }
 
-    let unsubscribe: Unsubscribe = () => {};
+    let unsubscribeSchedules: Unsubscribe = () => {};
+    let unsubscribeFeeder: Unsubscribe = () => {};
 
     const fetchFeederAndSchedules = async () => {
       try {
@@ -81,10 +87,16 @@ export default function SchedulesScreen() {
           const currentFeederId = feederDoc.id;
           setFeederId(currentFeederId);
 
+          // --- Listen to Feeder Doc for Smart Mode ---
+          unsubscribeFeeder = onSnapshot(feederDoc.ref, (doc) => {
+            setIsSmartMode(doc.data()?.isSmartMode || false);
+            setIsFeederLoading(false);
+          });
+
           const schedulesCollectionRef = collection(db, 'feeders', currentFeederId, 'schedules');
           const qSchedules = query(schedulesCollectionRef);
 
-          unsubscribe = onSnapshot(qSchedules, (snapshot) => {
+          unsubscribeSchedules = onSnapshot(qSchedules, (snapshot) => {
             const schedulesData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Schedule));
             setSchedules(schedulesData);
             setLoading(false);
@@ -97,20 +109,24 @@ export default function SchedulesScreen() {
           setSchedules([]);
           Alert.alert('No Feeder Found', 'Could not find a feeder associated with your account. Please provision one.');
           setLoading(false);
+          setIsFeederLoading(false);
         }
       } catch (error) {
         console.error("Error fetching feeder or schedules:", error);
         Alert.alert("Error", "Could not load schedules. Please try again.");
         setLoading(false);
+        setIsFeederLoading(false);
       }
     };
 
     fetchFeederAndSchedules();
-    return () => unsubscribe(); // Cleanup the listener
+    return () => {
+      unsubscribeSchedules();
+      unsubscribeFeeder(); // Cleanup both listeners
+    };
   }, [user]);
 
   const petFilters = ['All', ...Array.from(new Set(schedules.map(s => s.petName).filter(Boolean)))];
-
 
   const handleAddSchedule = () => {
     router.push({ pathname: "/schedule/[id]", params: { id: 'new' } });
@@ -118,6 +134,20 @@ export default function SchedulesScreen() {
 
   const handleEditSchedule = (scheduleId: string) => {
     router.push({ pathname: "/schedule/[id]", params: { id: scheduleId } });
+  };
+
+  // --- New Handler for Smart Mode Toggle ---
+  const onToggleSmartMode = async (newValue: boolean) => {
+    if (!feederId) return;
+    setIsSmartMode(newValue); // Optimistic update
+    try {
+      const feederRef = doc(db, 'feeders', feederId);
+      await updateDoc(feederRef, { isSmartMode: newValue });
+    } catch (error) {
+      console.error('Error updating smart mode: ', error);
+      Alert.alert('Error', 'Could not update smart mode setting.');
+      setIsSmartMode(!newValue); // Revert on error
+    }
   };
 
   const toggleSwitch = async (id: string, petId: string, currentValue: boolean) => {
@@ -195,6 +225,26 @@ export default function SchedulesScreen() {
     </TouchableOpacity>
   );
 
+  // --- Header component including the new Switch ---
+  const renderListHeader = () => (
+    <View style={styles.smartModeContainer}>
+      <View style={styles.smartModeTextContainer}>
+        <Text style={styles.smartModeLabel}>Enable Smart Scheduling</Text>
+        <Text style={styles.smartModeInfo}>
+          Notify and wait for confirmation before feeding.
+        </Text>
+      </View>
+      <Switch
+        trackColor={{ false: COLORS.lightGray, true: COLORS.accent }}
+        thumbColor={COLORS.white}
+        ios_backgroundColor={COLORS.lightGray}
+        onValueChange={onToggleSmartMode}
+        value={isSmartMode}
+        disabled={isFeederLoading}
+      />
+    </View>
+  );
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
@@ -221,6 +271,7 @@ export default function SchedulesScreen() {
           data={filteredSchedules}
           renderItem={renderScheduleItem}
           keyExtractor={(item) => item.id}
+          ListHeaderComponent={renderListHeader} // Add the header here
           contentContainerStyle={styles.listContainer}
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
@@ -249,6 +300,36 @@ const styles = StyleSheet.create({
   filterButtonText: { fontWeight: '600', color: COLORS.primary },
   filterButtonTextActive: { color: COLORS.white },
   listContainer: { padding: 20, flexGrow: 1 },
+  // Styles for the new smart mode switch
+  smartModeContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: COLORS.white,
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  smartModeTextContainer: {
+    flex: 1,
+    marginRight: 10,
+  },
+  smartModeLabel: { 
+    fontSize: 16, 
+    fontWeight: '600', 
+    color: COLORS.text 
+  },
+  smartModeInfo: {
+    fontSize: 13,
+    color: COLORS.darkGray,
+    marginTop: 2,
+  },
+  // Original schedule item styles
   scheduleItem: { backgroundColor: COLORS.white, borderRadius: 12, padding: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05, shadowRadius: 4, elevation: 2 },
   detailsContainer: { flex: 1, marginRight: 10 },
   scheduleTime: { fontSize: 22, fontWeight: 'bold', color: COLORS.text },
