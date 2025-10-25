@@ -1,3 +1,4 @@
+import { Expo, ExpoPushMessage } from "expo-server-sdk";
 import { initializeApp } from "firebase-admin/app";
 import { getDatabase, ServerValue } from "firebase-admin/database";
 import { getFirestore, Timestamp } from "firebase-admin/firestore";
@@ -11,6 +12,7 @@ initializeApp();
 
 const firestore = getFirestore();
 const rtdb = getDatabase();
+const expo = new Expo(); // Initialize Expo SDK
 
 // Define the structure of the expected request body for type safety
 interface RegisterFeederRequest {
@@ -49,6 +51,7 @@ export const registerFeeder = onRequest(
         foodLevels: { "1": 100, "2": 100 },
         streamStatus: { "1": "offline", "2": "offline" },
         isSmartMode: false, // Default smart mode to off
+        expoPushToken: null, // Add field to store push token
       });
 
       logger.info(`Successfully registered feeder: ${feederId}`);
@@ -97,11 +100,13 @@ export const scheduledFeedChecker = onSchedule(
       }
 
       const promises: Promise<any>[] = [];
+      const notificationsToSend: ExpoPushMessage[] = [];
 
       for (const feederDoc of feedersSnapshot.docs) {
         const feederId = feederDoc.id;
         const feederData = feederDoc.data();
         const isSmartMode = feederData.isSmartMode || false;
+        const pushToken = feederData.expoPushToken;
 
         const schedulesRef = feederDoc.ref.collection("schedules");
         const q = schedulesRef.where("isEnabled", "==", true);
@@ -121,14 +126,10 @@ export const scheduledFeedChecker = onSchedule(
                 // --- SMART SCHEDULING MODE ---
                 logger.info(`SMART MODE: Creating pending feed for ${schedule.petName}`);
                 
-                // Get pet's recommended portion for recalculation logic
                 let recommendedPortion = 0;
                 try {
                   const petRef = firestore.doc(`feeders/${feederId}/pets/${schedule.petId}`);
                   const petSnap = await petRef.get();
-
-                  // --- FIX 1: ---
-                  // In the Admin SDK, .exists is a boolean property, not a function.
                   if (petSnap.exists) {
                     recommendedPortion = petSnap.data()?.recommendedPortion || 0;
                   }
@@ -136,7 +137,9 @@ export const scheduledFeedChecker = onSchedule(
                    logger.error(`Could not fetch pet ${schedule.petId} for info.`, petError);
                 }
 
-                const pendingFeedRef = feederDoc.ref.collection("pendingFeeds").doc(scheduleDoc.id);
+                const pendingFeedRef = feederDoc.ref.collection("pendingFeeds").doc(); // Create with a new ID
+                const pendingFeedId = pendingFeedRef.id;
+
                 await pendingFeedRef.set({
                   feederId: feederId,
                   scheduleId: scheduleDoc.id,
@@ -144,19 +147,33 @@ export const scheduledFeedChecker = onSchedule(
                   petName: schedule.petName,
                   bowlNumber: schedule.bowlNumber,
                   portionGrams: schedule.portionGrams,
-                  recommendedPortion: recommendedPortion, // Store for later recalculation
+                  recommendedPortion: recommendedPortion,
                   status: "pending",
                   createdAt: Timestamp.now(),
                   expiresAt: Timestamp.fromMillis(Timestamp.now().toMillis() + 3600 * 1000), // 1 hour from now
                 });
                 
-                // TODO: Send push notification to user
+                // --- Send "Smart" Notification ---
+                if (pushToken && Expo.isExpoPushToken(pushToken)) {
+                  notificationsToSend.push({
+                    to: pushToken,
+                    sound: "default",
+                    title: `Time to feed ${schedule.petName}!`,
+                    body: `Waiting for ${schedule.petName} to arrive.`,
+                    data: {
+                      type: "smartFeed",
+                      feederId: feederId,
+                      pendingFeedId: pendingFeedId,
+                    },
+                    // Set category for "Feed Now" action
+                    categoryId: "smartFeedAction",
+                  });
+                }
                 
               } else {
                 // --- SIMPLE SCHEDULING MODE ---
                 logger.info(`SIMPLE MODE: Sending 'feed' command for ${schedule.petName}`);
                 
-                // 1. Send command to RTDB
                 const command = {
                   command: "feed",
                   bowl: schedule.bowlNumber,
@@ -166,13 +183,23 @@ export const scheduledFeedChecker = onSchedule(
                 const commandRef = rtdb.ref(`commands/${feederId}`);
                 await commandRef.set(command);
 
-                // 2. Log to feedHistory
                 await feederDoc.ref.collection("feedHistory").add({
                   petName: schedule.petName,
                   portionGrams: schedule.portionGrams,
                   status: "success",
                   createdAt: Timestamp.now(),
                 });
+
+                // --- Send "Simple" Notification ---
+                if (pushToken && Expo.isExpoPushToken(pushToken)) {
+                  notificationsToSend.push({
+                    to: pushToken,
+                    sound: "default",
+                    title: "Feeding Dispensed 🐾",
+                    body: `${schedule.petName} is being fed ${schedule.portionGrams}g.`,
+                    data: { type: "simpleFeed" },
+                  });
+                }
               }
             }
           }
@@ -183,6 +210,23 @@ export const scheduledFeedChecker = onSchedule(
       }
 
       await Promise.all(promises);
+
+      // Send all collected notifications in chunks
+      if (notificationsToSend.length > 0) {
+        logger.info(`Sending ${notificationsToSend.length} notifications...`);
+        const chunks = expo.chunkPushNotifications(notificationsToSend);
+        const tickets = [];
+        for (const chunk of chunks) {
+          try {
+            const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
+            tickets.push(...ticketChunk);
+            // NOTE: You can add logic here to check for errors
+          } catch (error) {
+            logger.error("Error sending push notification chunk:", error);
+          }
+        }
+      }
+
       logger.info("Scheduled feed checker finished.");
     } catch (error) {
       logger.error("Error running scheduled feed checker:", error);
@@ -203,7 +247,6 @@ export const checkPendingFeeds = onSchedule(
     logger.info("Running checkPendingFeeds...");
     const now = Timestamp.now();
 
-    // Query all pendingFeeds across all feeders that have expired
     const q = firestore.collectionGroup("pendingFeeds").where("expiresAt", "<=", now);
     const expiredFeedsSnap = await q.get();
 
@@ -216,25 +259,18 @@ export const checkPendingFeeds = onSchedule(
 
     for (const feedDoc of expiredFeedsSnap.docs) {
       const pendingFeed = feedDoc.data();
-      const { feederId, scheduleId, petId, recommendedPortion } = pendingFeed;
+      const { feederId, scheduleId, petId, recommendedPortion, petName } = pendingFeed;
       
       logger.warn(`Feed ${feedDoc.id} for pet ${petId} has EXPIRED. Recalculating portions.`);
       
-      // This promise will handle the recalculation for one missed feed
       const promise = (async () => {
         const batch = firestore.batch();
         
-        // 1. Delete the pending feed request
         batch.delete(feedDoc.ref);
         
-        // 2. Disable the missed schedule
         const scheduleRef = firestore.doc(`feeders/${feederId}/schedules/${scheduleId}`);
         batch.update(scheduleRef, { isEnabled: false, portionGrams: 0 });
 
-        // 3. Get all *other* enabled schedules for this pet
-        
-        // --- FIX 2: ---
-        // In the Admin SDK, you must get the doc ref first, then the collection.
         const schedulesRef = firestore.collection("feeders").doc(feederId).collection("schedules");
         const qSchedules = schedulesRef
           .where("petId", "==", petId)
@@ -242,21 +278,30 @@ export const checkPendingFeeds = onSchedule(
           
         const enabledSchedulesSnap = await qSchedules.get();
         
-        // This count is correct because the missed schedule is not yet committed as disabled.
-        // We filter it out manually.
         const remainingEnabledDocs = enabledSchedulesSnap.docs.filter(doc => doc.id !== scheduleId);
         const newEnabledCount = remainingEnabledDocs.length;
 
         const newPortion = newEnabledCount > 0 ? Math.round(recommendedPortion / newEnabledCount) : 0;
 
-        // 4. Update all *remaining* enabled schedules with the new portion
         remainingEnabledDocs.forEach(scheduleDoc => {
           batch.update(scheduleDoc.ref, { portionGrams: newPortion });
         });
         
-        // 5. Commit all changes
         await batch.commit();
         logger.info(`Successfully recalculated portions for pet ${petId} after missed feed.`);
+
+        // --- Send "Missed Feed" Notification ---
+        const feederDoc = await firestore.doc(`feeders/${feederId}`).get();
+        const pushToken = feederDoc.data()?.expoPushToken;
+        if (pushToken && Expo.isExpoPushToken(pushToken)) {
+          await expo.sendPushNotificationsAsync([{
+            to: pushToken,
+            sound: "default",
+            title: "Missed Feeding 😿",
+            body: `${petName} missed a meal. Portions have been recalculated for the day.`,
+            data: { type: "missedFeed" },
+          }]);
+        }
         
       })();
       
@@ -293,7 +338,6 @@ export const onPendingFeedTrigger = onDocumentUpdated(
       logger.info(`MANUAL TRIGGER: Sending 'feed' command for ${petName}`);
 
       try {
-        // 1. Send command to RTDB
         const command = {
           command: "feed",
           bowl: bowlNumber,
@@ -303,7 +347,6 @@ export const onPendingFeedTrigger = onDocumentUpdated(
         const commandRef = rtdb.ref(`commands/${feederId}`);
         await commandRef.set(command);
 
-        // 2. Log to feedHistory
         const historyRef = event.data.after.ref.parent.parent?.collection("feedHistory");
         if (historyRef) {
            await historyRef.add({
@@ -314,12 +357,96 @@ export const onPendingFeedTrigger = onDocumentUpdated(
            });
         }
        
-        // 3. Delete the pendingFeed document
         await event.data.after.ref.delete();
         
       } catch (error) {
          logger.error(`Error triggering manual feed for ${feederId}:`, error);
       }
     }
+  }
+);
+
+/**
+ * Runs once every day at midnight (Singapore Time) to re-enable schedules.
+ */
+export const resetDailySchedules = onSchedule(
+  {
+    schedule: "0 0 * * *", // 00:00 every day
+    timeZone: "Asia/Singapore",
+    region: "asia-southeast1",
+  },
+  async (event) => {
+    logger.info("Running resetDailySchedules...");
+    
+    // Find all schedules that were disabled (presumably from a missed feed)
+    const q = firestore.collectionGroup("schedules").where("isEnabled", "==", false);
+    const disabledSchedulesSnap = await q.get();
+
+    if (disabledSchedulesSnap.empty) {
+      logger.info("No disabled schedules to re-enable.");
+      return;
+    }
+
+    // Use a map to group schedules by petId to perform recalculations
+    const petsToRecalculate = new Map<string, { feederId: string; recommendedPortion: number }>();
+    const batch = firestore.batch();
+
+    for (const scheduleDoc of disabledSchedulesSnap.docs) {
+      const schedule = scheduleDoc.data();
+      const { petId, feederId } = schedule;
+
+      // Re-enable the schedule
+      batch.update(scheduleDoc.ref, { isEnabled: true });
+      
+      if (petId && !petsToRecalculate.has(petId)) {
+        // Get pet info for recalculation
+        try {
+          const petSnap = await firestore.doc(`feeders/${feederId}/pets/${petId}`).get();
+          if (petSnap.exists) {
+            petsToRecalculate.set(petId, {
+              feederId: feederId,
+              recommendedPortion: petSnap.data()?.recommendedPortion || 0,
+            });
+          }
+        } catch (e) {
+          logger.error(`Could not fetch pet ${petId} for recalculation.`);
+        }
+      }
+    }
+    
+    // Commit the re-enabling first
+    await batch.commit();
+    logger.info(`Re-enabled ${disabledSchedulesSnap.size} schedules.`);
+
+    // --- Now, recalculate portions for all affected pets ---
+    // We must do this *after* enabling them to get the correct count.
+    
+    const recalcBatch = firestore.batch();
+    
+    for (const [petId, petInfo] of petsToRecalculate.entries()) {
+      const { feederId, recommendedPortion } = petInfo;
+
+      const schedulesRef = firestore.collection(`feeders/${feederId}/schedules`);
+      const qPetSchedules = schedulesRef.where("petId", "==", petId);
+      
+      const petSchedulesSnap = await qPetSchedules.get();
+      
+      const allPetSchedules = petSchedulesSnap.docs.map(doc => doc.data());
+      // We are now calculating based on the newly re-enabled state
+      const enabledCount = allPetSchedules.filter(s => s.isEnabled).length;
+      
+      const newPortion = enabledCount > 0 ? Math.round(recommendedPortion / enabledCount) : 0;
+      
+      // Update all schedules for this pet with the new portion
+      petSchedulesSnap.docs.forEach(doc => {
+        recalcBatch.update(doc.ref, {
+          portionGrams: doc.data().isEnabled ? newPortion : 0,
+        });
+      });
+      logger.info(`Recalculating portions for pet ${petId}. New portion: ${newPortion}g`);
+    }
+
+    await recalcBatch.commit();
+    logger.info("resetDailySchedules finished.");
   }
 );

@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "847280230673",
+    "firebase_url": "https://pawfeeds-v2-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "pawfeeds-v2",
+    "storage_bucket": "pawfeeds-v2.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:847280230673:android:a6f1eba3217c52bcbbfcb0",
+        "android_client_info": {
+          "package_name": "com.enchi244.pawfeedsapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD2D1HDe_gIE__gI5Yd1bwkyuJtdBXiJ48"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
