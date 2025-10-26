@@ -1,7 +1,8 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { collection, deleteDoc, doc, DocumentData, getDoc, getDocs, query, where, writeBatch } from 'firebase/firestore';
+// 1. Import native firestore types
+import { FirebaseFirestoreTypes } from '@react-native-firebase/firestore';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -19,8 +20,9 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../context/AuthContext';
+// 2. Import native db instance
 import { db } from '../../firebaseConfig';
-import { recalculatePortionsForPet } from '../../utils/portionLogic'; // 1. Import our utility function
+import { recalculatePortionsForPet } from '../../utils/portionLogic'; // Ensure this is also updated if needed
 
 const COLORS = {
   primary: '#8C6E63',
@@ -41,6 +43,9 @@ interface Pet {
   name: string;
   recommendedPortion: number;
 }
+
+// 3. Define the Unsubscribe type
+type Unsubscribe = () => void;
 
 const parseTimeString = (timeString: string | undefined): Date => {
   const now = new Date();
@@ -66,7 +71,7 @@ export default function ScheduleProfileScreen() {
   const [date, setDate] = useState(new Date());
   const [showTimePicker, setShowTimePicker] = useState(false);
   const [selectedDays, setSelectedDays] = useState<number[]>([]);
-  
+
   const [pets, setPets] = useState<Pet[]>([]);
   const [selectedPet, setSelectedPet] = useState<Pet | null>(null);
   const [selectedBowl, setSelectedBowl] = useState<number | null>(null);
@@ -75,7 +80,7 @@ export default function ScheduleProfileScreen() {
   const [isBowlModalVisible, setBowlModalVisible] = useState(false);
 
   const [isLoading, setIsLoading] = useState(true);
-  
+
   const [feederId, setFeederId] = useState<string | null>(null);
 
   const bowls = useMemo(() => [{ id: 1, name: 'Bowl 1' }, { id: 2, name: 'Bowl 2' }], []);
@@ -87,14 +92,21 @@ export default function ScheduleProfileScreen() {
         router.back();
         return;
       }
-      const feedersRef = collection(db, 'feeders');
-      const q = query(feedersRef, where('owner_uid', '==', user.uid));
-      const querySnapshot = await getDocs(q);
-      if (!querySnapshot.empty) {
-        setFeederId(querySnapshot.docs[0].id);
-      } else {
-        Alert.alert('No Feeder Found', 'Could not find a feeder associated with your account.');
-        router.back();
+      try {
+        // Use native firestore syntax
+        const feedersRef = db.collection('feeders');
+        const q = feedersRef.where('owner_uid', '==', user.uid);
+        const querySnapshot = await q.get();
+        if (!querySnapshot.empty) {
+          setFeederId(querySnapshot.docs[0].id);
+        } else {
+          Alert.alert('No Feeder Found', 'Could not find a feeder associated with your account.');
+          router.back();
+        }
+      } catch (error) {
+          console.error("Error fetching feeder ID:", error);
+          Alert.alert('Error', 'Could not verify feeder status.');
+          router.back();
       }
     };
     fetchFeederId();
@@ -102,18 +114,20 @@ export default function ScheduleProfileScreen() {
 
   useEffect(() => {
     const fetchInitialData = async () => {
-      
+
       if (!feederId) {
         setIsLoading(false); // Ensure loading stops if there's no feederId
         return;
       }
 
       try {
-        const petsCollectionRef = collection(db, 'feeders', feederId, 'pets');
-        const q = query(petsCollectionRef);
-        const querySnapshot = await getDocs(q);
+        // Use native firestore syntax
+        const petsCollectionRef = db.collection('feeders').doc(feederId).collection('pets');
+        const q = petsCollectionRef; // Query stays the same
+        const querySnapshot = await q.get();
         const petsData: Pet[] = [];
-        querySnapshot.forEach((doc: DocumentData) => {
+        // Use native firestore snapshot iteration
+        querySnapshot.forEach((doc: FirebaseFirestoreTypes.QueryDocumentSnapshot) => { // Explicit type
           petsData.push({
             id: doc.id,
             name: doc.data().name,
@@ -122,11 +136,17 @@ export default function ScheduleProfileScreen() {
         });
         setPets(petsData);
 
-        if (isEditing && id && feederId) { // Only fetch if feederId is available
-          const scheduleDocRef = doc(db, 'feeders', feederId, 'schedules', id);
-          const docSnap = await getDoc(scheduleDocRef);
+        if (isEditing && id) { // Only fetch if feederId is available
+          // Use native firestore syntax
+          const scheduleDocRef = db.collection('feeders').doc(feederId).collection('schedules').doc(id);
+          // Use native get() and explicitly type snapshot
+          const docSnap: FirebaseFirestoreTypes.DocumentSnapshot = await scheduleDocRef.get();
+
+          // ***** START FIX *****
+          // Try calling exists() as a method to satisfy the linter
           if (docSnap.exists()) {
-            const data = docSnap.data();
+          // ***** END FIX *****
+            const data = docSnap.data() as FirebaseFirestoreTypes.DocumentData; // Cast data
             setName(data.name || '');
             setDate(parseTimeString(data.time));
 
@@ -134,11 +154,13 @@ export default function ScheduleProfileScreen() {
                 const dayIndices = data.repeatDays.map(dayLetter => STORAGE_DAYS.indexOf(dayLetter)).filter(index => index !== -1);
                 setSelectedDays(dayIndices);
             }
-            
-            // 2. Use the more reliable petId to find the selected pet
+
             const pet = petsData.find(p => p.id === data.petId);
             setSelectedPet(pet || null);
             setSelectedBowl(data.bowlNumber || null);
+          } else {
+              Alert.alert('Error', 'Schedule not found.');
+              router.back();
           }
         }
       } catch (error) {
@@ -148,9 +170,9 @@ export default function ScheduleProfileScreen() {
         setIsLoading(false);
       }
     };
-    
+
     fetchInitialData();
-  }, [id, isEditing, feederId]); // Depend on feederId
+  }, [id, isEditing, feederId, router]); // Depend on feederId and router
 
 
   const onTimeChange = (event: DateTimePickerEvent, selectedDate?: Date) => {
@@ -164,16 +186,15 @@ export default function ScheduleProfileScreen() {
 
   const formatTime = (dateToFormat: Date) => {
     if (isNaN(dateToFormat.getTime())) {
-        // This case should ideally not be hit with the new logic
         return 'Select a time';
     }
     return dateToFormat.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
   };
-  
+
   const handleDayPress = (dayIndex: number) => {
-    setSelectedDays(prevDays => 
-      prevDays.includes(dayIndex) 
-        ? prevDays.filter(d => d !== dayIndex) 
+    setSelectedDays(prevDays =>
+      prevDays.includes(dayIndex)
+        ? prevDays.filter(d => d !== dayIndex)
         : [...prevDays, dayIndex]
     );
   };
@@ -187,7 +208,7 @@ export default function ScheduleProfileScreen() {
       Alert.alert('Error', 'Feeder ID not found. Cannot save schedule.');
       return;
     }
-    
+
     setIsLoading(true);
 
     const pad = (num: number) => num.toString().padStart(2, '0');
@@ -205,13 +226,14 @@ export default function ScheduleProfileScreen() {
     };
 
     try {
-      const batch = writeBatch(db);
-      const schedulesRef = collection(db, 'feeders', feederId, 'schedules');
+      // Use native firestore batch
+      const batch = db.batch();
+      const schedulesRef = db.collection('feeders').doc(feederId).collection('schedules');
 
       // Get all existing enabled schedules for the pet
-      const q = query(schedulesRef, where('petId', '==', selectedPet.id), where('isEnabled', '==', true));
-      const querySnapshot = await getDocs(q);
-      
+      const q = schedulesRef.where('petId', '==', selectedPet.id).where('isEnabled', '==', true);
+      const querySnapshot = await q.get();
+
       // Filter out the current schedule if we are editing it, as it will be replaced
       const existingSchedules = querySnapshot.docs.filter(doc => doc.id !== id);
       const totalSchedules = existingSchedules.length + 1; // +1 for the one we are saving
@@ -219,6 +241,7 @@ export default function ScheduleProfileScreen() {
 
       // Update all existing schedules with the new portion
       existingSchedules.forEach(scheduleDoc => {
+        // Use native batch update syntax
         batch.update(scheduleDoc.ref, { portionGrams: newPortion });
       });
 
@@ -226,13 +249,16 @@ export default function ScheduleProfileScreen() {
       scheduleData.portionGrams = newPortion;
 
       if (isEditing && id) {
-        const scheduleDocRef = doc(db, 'feeders', feederId, 'schedules', id);
+        // Use native firestore syntax
+        const scheduleDocRef = db.collection('feeders').doc(feederId).collection('schedules').doc(id);
+        // Use native batch update syntax
         batch.update(scheduleDocRef, scheduleData);
       } else {
-        const newScheduleRef = doc(collection(db, 'feeders', feederId, 'schedules'));
+         // Use native firestore syntax and batch set
+        const newScheduleRef = db.collection('feeders').doc(feederId).collection('schedules').doc(); // Generate ID client-side for batch
         batch.set(newScheduleRef, scheduleData);
       }
-      
+
       await batch.commit();
       Alert.alert(isEditing ? 'Schedule Updated' : 'Schedule Saved', 'All related feeding portions have been recalculated.');
       router.back();
@@ -250,17 +276,19 @@ export default function ScheduleProfileScreen() {
       `Are you sure you want to delete the "${name}" schedule?`,
       [
         { text: 'Cancel', style: 'cancel' },
-        { 
-          text: 'Delete', 
-          style: 'destructive', 
+        {
+          text: 'Delete',
+          style: 'destructive',
           onPress: async () => {
             if (isEditing && id && selectedPet && feederId) { // Ensure we have a pet and feederId to update
               setIsLoading(true);
               try {
-                const scheduleDocRef = doc(db, 'feeders', feederId, 'schedules', id);
-                await deleteDoc(scheduleDocRef);
-                
-                // 5. Trigger portion recalculation after deleting
+                // Use native firestore syntax
+                const scheduleDocRef = db.collection('feeders').doc(feederId).collection('schedules').doc(id);
+                await scheduleDocRef.delete();
+
+                // Trigger portion recalculation after deleting
+                // Ensure recalculatePortionsForPet expects petId only (matching previous fix)
                 await recalculatePortionsForPet(selectedPet.id);
 
                 Alert.alert('Schedule Deleted');
@@ -271,6 +299,8 @@ export default function ScheduleProfileScreen() {
               } finally {
                 setIsLoading(false);
               }
+            } else {
+                Alert.alert('Error', 'Missing information to delete schedule.');
             }
           }
         },
@@ -278,7 +308,7 @@ export default function ScheduleProfileScreen() {
     );
   };
 
-  if (isLoading) {
+  if (isLoading || !feederId) { // Also loading if feederId is not ready
     return <View style={styles.loadingContainer}><ActivityIndicator size="large" color={COLORS.primary} /></View>;
   }
 
@@ -299,7 +329,7 @@ export default function ScheduleProfileScreen() {
         <TouchableOpacity style={styles.input} onPress={() => setShowTimePicker(true)}>
             <Text style={styles.timeText}>{formatTime(date)}</Text>
         </TouchableOpacity>
-        
+
         {Platform.OS === 'android' && showTimePicker && (
           <DateTimePicker value={date} mode="time" is24Hour={false} display="default" onChange={onTimeChange} />
         )}
@@ -308,12 +338,12 @@ export default function ScheduleProfileScreen() {
             <Modal visible={showTimePicker} transparent={true} animationType="fade">
                 <View style={styles.modalBackdrop}>
                     <View style={[styles.modalContent, { backgroundColor: colorScheme === 'dark' ? '#333' : COLORS.background }]}>
-                        <DateTimePicker 
-                            value={date} 
-                            mode="time" 
-                            is24Hour={false} 
-                            display="spinner" 
-                            onChange={onTimeChange} 
+                        <DateTimePicker
+                            value={date}
+                            mode="time"
+                            is24Hour={false}
+                            display="spinner"
+                            onChange={onTimeChange}
                             textColor={colorScheme === 'dark' ? COLORS.white : COLORS.text}
                             themeVariant={colorScheme ?? 'light'}
                         />
@@ -324,11 +354,11 @@ export default function ScheduleProfileScreen() {
                 </View>
             </Modal>
         )}
-        
+
         <Text style={styles.label}>Repeat on Days</Text>
         <View style={styles.daySelectorContainer}>
           {DISPLAY_DAYS.map((day, index) => (
-            <TouchableOpacity 
+            <TouchableOpacity
               key={index}
               style={[styles.dayButton, selectedDays.includes(index) && styles.dayButtonSelected]}
               onPress={() => handleDayPress(index)}
@@ -355,7 +385,7 @@ export default function ScheduleProfileScreen() {
         <TouchableOpacity style={styles.saveButton} onPress={handleSave}>
           <Text style={styles.saveButtonText}>{isEditing ? 'Update Schedule' : 'Save Schedule'}</Text>
         </TouchableOpacity>
-        
+
         {isEditing && (
           <TouchableOpacity style={styles.deleteButton} onPress={handleDelete}>
             <Text style={styles.deleteButtonText}>Delete Schedule</Text>
@@ -384,7 +414,7 @@ export default function ScheduleProfileScreen() {
         </View>
       </Modal>
 
-       <Modal visible={isBowlModalVisible} transparent={true} animationType="fade">
+        <Modal visible={isBowlModalVisible} transparent={true} animationType="fade">
         <View style={styles.modalBackdrop}>
             <View style={styles.selectionModalContent}>
                 <Text style={styles.modalTitle}>Select a Bowl</Text>

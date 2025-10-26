@@ -1,6 +1,7 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { collection, doc, getDoc, getDocs, onSnapshot, query, Unsubscribe, updateDoc, where, writeBatch } from 'firebase/firestore';
+// 1. Import native firestore types
+import { FirebaseFirestoreTypes } from '@react-native-firebase/firestore';
 import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
@@ -16,6 +17,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../context/AuthContext';
+// 2. Import native db instance
 import { db } from '../../firebaseConfig';
 
 const COLORS = {
@@ -40,6 +42,9 @@ interface Schedule {
   portionGrams?: number; // Add optional portionGrams
 }
 
+// 3. Define the Unsubscribe type
+type Unsubscribe = () => void;
+
 const formatScheduleTime = (timeString: string): string => {
     if (!timeString) return 'Invalid Time';
     const [hours, minutes] = timeString.split(':').map(Number);
@@ -58,7 +63,7 @@ export default function SchedulesScreen() {
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [loading, setLoading] = useState(true);
   const { user } = useAuth();
-  
+
   const [activeFilter, setActiveFilter] = useState('All');
   const [feederId, setFeederId] = useState<string | null>(null);
 
@@ -78,9 +83,10 @@ export default function SchedulesScreen() {
 
     const fetchFeederAndSchedules = async () => {
       try {
-        const feedersRef = collection(db, 'feeders');
-        const qFeeder = query(feedersRef, where('owner_uid', '==', user.uid));
-        const querySnapshot = await getDocs(qFeeder);
+        // 4. Use native firestore syntax
+        const feedersRef = db.collection('feeders');
+        const qFeeder = feedersRef.where('owner_uid', '==', user.uid);
+        const querySnapshot = await qFeeder.get();
 
         if (!querySnapshot.empty) {
           const feederDoc = querySnapshot.docs[0];
@@ -88,23 +94,34 @@ export default function SchedulesScreen() {
           setFeederId(currentFeederId);
 
           // --- Listen to Feeder Doc for Smart Mode ---
-          unsubscribeFeeder = onSnapshot(feederDoc.ref, (doc) => {
-            setIsSmartMode(doc.data()?.isSmartMode || false);
-            setIsFeederLoading(false);
-          });
+          // 5. Use native firestore onSnapshot syntax
+          unsubscribeFeeder = feederDoc.ref.onSnapshot(
+            (doc: FirebaseFirestoreTypes.DocumentSnapshot) => { // Explicit type
+              setIsSmartMode(doc.data()?.isSmartMode || false);
+              setIsFeederLoading(false);
+            },
+            (error) => { // Error handler
+              console.error("Feeder onSnapshot error:", error);
+              setIsFeederLoading(false);
+            }
+          );
 
-          const schedulesCollectionRef = collection(db, 'feeders', currentFeederId, 'schedules');
-          const qSchedules = query(schedulesCollectionRef);
+          // 6. Use native firestore syntax
+          const schedulesCollectionRef = db.collection('feeders').doc(currentFeederId).collection('schedules');
+          const qSchedules = schedulesCollectionRef; // Query stays the same, just using native ref
 
-          unsubscribeSchedules = onSnapshot(qSchedules, (snapshot) => {
-            const schedulesData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Schedule));
-            setSchedules(schedulesData);
-            setLoading(false);
-          }, (error) => {
-              console.error("Error fetching schedules: ", error);
-              Alert.alert("Error", "Could not fetch schedules from the database.");
+          // 7. Use native firestore onSnapshot syntax
+          unsubscribeSchedules = qSchedules.onSnapshot(
+            (snapshot: FirebaseFirestoreTypes.QuerySnapshot) => { // Explicit type
+              const schedulesData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Schedule));
+              setSchedules(schedulesData);
               setLoading(false);
-          });
+            }, (error) => { // Error handler
+                console.error("Error fetching schedules: ", error);
+                Alert.alert("Error", "Could not fetch schedules from the database.");
+                setLoading(false);
+            }
+          );
         } else {
           setSchedules([]);
           Alert.alert('No Feeder Found', 'Could not find a feeder associated with your account. Please provision one.');
@@ -141,8 +158,9 @@ export default function SchedulesScreen() {
     if (!feederId) return;
     setIsSmartMode(newValue); // Optimistic update
     try {
-      const feederRef = doc(db, 'feeders', feederId);
-      await updateDoc(feederRef, { isSmartMode: newValue });
+      // 8. Use native firestore syntax
+      const feederRef = db.collection('feeders').doc(feederId);
+      await feederRef.update({ isSmartMode: newValue });
     } catch (error) {
       console.error('Error updating smart mode: ', error);
       Alert.alert('Error', 'Could not update smart mode setting.');
@@ -161,20 +179,21 @@ export default function SchedulesScreen() {
     }
 
     try {
-      const batch = writeBatch(db);
-      const schedulesRef = collection(db, 'feeders', feederId, 'schedules');
-      const petRef = doc(db, 'feeders', feederId, 'pets', petId);
+      // 9. Use native firestore batch
+      const batch = db.batch();
+      const schedulesRef = db.collection('feeders').doc(feederId).collection('schedules');
+      const petRef = db.collection('feeders').doc(feederId).collection('pets').doc(petId);
 
       // 1. Get the pet's total recommended portion
-      const petSnap = await getDoc(petRef);
-      if (!petSnap.exists()) {
+      const petSnap = await petRef.get();
+      if (!petSnap.exists) {
         throw new Error("Pet not found for recalculation.");
       }
-      const recommendedPortion = petSnap.data().recommendedPortion || 0;
+      const recommendedPortion = petSnap.data()?.recommendedPortion || 0;
 
       // 2. Get all schedules for the pet to determine the new count of enabled schedules
-      const q = query(schedulesRef, where('petId', '==', petId));
-      const querySnapshot = await getDocs(q);
+      const q = schedulesRef.where('petId', '==', petId);
+      const querySnapshot = await q.get();
 
       // The new state is `!currentValue`. We count how many schedules will be enabled *after* this toggle.
       const newEnabledCount = querySnapshot.docs.filter(doc => {
@@ -187,6 +206,7 @@ export default function SchedulesScreen() {
       querySnapshot.forEach(scheduleDoc => {
         const isCurrentDoc = scheduleDoc.id === id;
         const willBeEnabled = isCurrentDoc ? !currentValue : scheduleDoc.data().isEnabled;
+        // Use native batch update syntax
         batch.update(scheduleDoc.ref, { isEnabled: willBeEnabled, portionGrams: willBeEnabled ? newPortion : 0 });
       });
 
@@ -250,7 +270,7 @@ export default function SchedulesScreen() {
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Feeding Schedules</Text>
       </View>
-      
+
       <View style={styles.filterBar}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false}>
           {petFilters.map(petName => (
@@ -319,10 +339,10 @@ const styles = StyleSheet.create({
     flex: 1,
     marginRight: 10,
   },
-  smartModeLabel: { 
-    fontSize: 16, 
-    fontWeight: '600', 
-    color: COLORS.text 
+  smartModeLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.text
   },
   smartModeInfo: {
     fontSize: 13,

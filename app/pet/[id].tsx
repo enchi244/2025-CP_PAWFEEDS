@@ -1,6 +1,7 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, query, updateDoc, where } from 'firebase/firestore';
+// 1. Import native firestore types
+import { FirebaseFirestoreTypes } from '@react-native-firebase/firestore';
 import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
@@ -14,7 +15,9 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../context/AuthContext';
+// 2. Import native db instance
 import { db } from '../../firebaseConfig';
+// Assuming recalculatePortionsForPet is updated or doesn't directly depend on JS SDK specifics
 import { recalculatePortionsForPet } from '../../utils/portionLogic';
 
 const COLORS = {
@@ -74,13 +77,20 @@ export default function PetProfileScreen() {
         router.back();
         return;
       }
-      const feedersRef = collection(db, 'feeders');
-      const q = query(feedersRef, where('owner_uid', '==', user.uid));
-      const querySnapshot = await getDocs(q);
-      if (!querySnapshot.empty) {
-        setFeederId(querySnapshot.docs[0].id);
-      } else {
-        Alert.alert('No Feeder Found', 'Could not find a feeder associated with your account.');
+      try {
+        // Use native firestore syntax
+        const feedersRef = db.collection('feeders');
+        const q = feedersRef.where('owner_uid', '==', user.uid);
+        const querySnapshot = await q.get();
+        if (!querySnapshot.empty) {
+          setFeederId(querySnapshot.docs[0].id);
+        } else {
+          Alert.alert('No Feeder Found', 'Could not find a feeder associated with your account.');
+          router.back();
+        }
+      } catch (error) {
+        console.error("Error fetching feeder ID:", error);
+        Alert.alert('Error', 'Could not verify feeder status.');
         router.back();
       }
     };
@@ -91,23 +101,39 @@ export default function PetProfileScreen() {
     const fetchPetData = async () => {
       if (isEditing && id && feederId) {
         setIsLoading(true);
-        const petDocRef = doc(db, 'feeders', feederId, 'pets', id);
-        const docSnap = await getDoc(petDocRef);
-        if (docSnap.exists()) {
-          const petData = docSnap.data();
-          setName(petData.name || '');
-          setAge(petData.age ? petData.age.toString() : '');
-          setWeight(petData.weight ? petData.weight.toString() : '');
-          setKcal(petData.kcal ? petData.kcal.toString() : '');
-          setNeuterStatus(petData.neuterStatus || 'Neutered/Spayed');
-          setActivityLevel(petData.activityLevel || 'Normal');
-          setRecommendedPortion(petData.recommendedPortion || 0);
+        try {
+            // Use native firestore syntax
+            const petDocRef = db.collection('feeders').doc(feederId).collection('pets').doc(id);
+            const docSnap: FirebaseFirestoreTypes.DocumentSnapshot = await petDocRef.get();
+
+            // ***** START FIX *****
+            // Try calling exists() as a method to satisfy the linter
+            if (docSnap.exists()) {
+            // ***** END FIX *****
+              const petData = docSnap.data() as FirebaseFirestoreTypes.DocumentData; // Cast data
+              setName(petData.name || '');
+              setAge(petData.age ? petData.age.toString() : '');
+              setWeight(petData.weight ? petData.weight.toString() : '');
+              setKcal(petData.kcal ? petData.kcal.toString() : '');
+              setNeuterStatus(petData.neuterStatus || 'Neutered/Spayed');
+              setActivityLevel(petData.activityLevel || 'Normal');
+              setRecommendedPortion(petData.recommendedPortion || 0);
+            } else {
+                Alert.alert('Error', 'Pet profile not found.');
+                router.back();
+            }
+        } catch (error) {
+            console.error("Error fetching pet data:", error);
+            Alert.alert('Error', 'Could not load pet data.');
+        } finally {
+            setIsLoading(false);
         }
-        setIsLoading(false);
       }
     };
-    fetchPetData();
-  }, [id, isEditing, feederId]);
+    if (feederId) { // Only fetch if feederId is known
+        fetchPetData();
+    }
+  }, [id, isEditing, feederId, router]);
 
   useEffect(() => {
     const calculatePortion = () => {
@@ -143,7 +169,7 @@ export default function PetProfileScreen() {
       Alert.alert('Error', 'Feeder ID not found. Cannot save pet.');
       return;
     }
-    
+
     setIsLoading(true);
     const petData = {
       name,
@@ -157,14 +183,18 @@ export default function PetProfileScreen() {
 
     try {
       if (isEditing && id) {
-        const petDocRef = doc(db, 'feeders', feederId, 'pets', id);
-        await updateDoc(petDocRef, petData);
-        await recalculatePortionsForPet(id); // Recalculate portions on update
+        // Use native firestore syntax
+        const petDocRef = db.collection('feeders').doc(feederId).collection('pets').doc(id);
+        await petDocRef.update(petData);
+        // Pass only petId as expected by the function definition
+        await recalculatePortionsForPet(id);
         Alert.alert('Pet Updated!', `Profile for ${name} has been updated.`);
       } else {
-        const petsCollectionRef = collection(db, 'feeders', feederId, 'pets');
-        const newPetRef = await addDoc(petsCollectionRef, petData);
-        await recalculatePortionsForPet(newPetRef.id); // Recalculate portions for new pet
+        // Use native firestore syntax
+        const petsCollectionRef = db.collection('feeders').doc(feederId).collection('pets');
+        const newPetRef = await petsCollectionRef.add(petData);
+        // Pass only petId as expected by the function definition
+        await recalculatePortionsForPet(newPetRef.id);
         Alert.alert('Pet Saved!', `Profile for ${name} has been created.`);
       }
       router.back();
@@ -182,16 +212,18 @@ export default function PetProfileScreen() {
       `Are you sure you want to delete ${name}'s profile? This action cannot be undone.`,
       [
         { text: 'Cancel', style: 'cancel' },
-        { 
-          text: 'Delete', 
-          style: 'destructive', 
+        {
+          text: 'Delete',
+          style: 'destructive',
           onPress: async () => {
             if (isEditing && id && feederId) {
               setIsLoading(true);
               try {
-                // Note: Consider deleting associated schedules or reassigning them in a real app
-                const petDocRef = doc(db, 'feeders', feederId, 'pets', id);
-                await deleteDoc(petDocRef);
+                // TODO: Consider deleting associated schedules or reassigning them in a real app
+
+                // Use native firestore syntax
+                const petDocRef = db.collection('feeders').doc(feederId).collection('pets').doc(id);
+                await petDocRef.delete();
                 Alert.alert('Pet Deleted', `${name}'s profile has been removed.`);
                 router.back();
               } catch (error) {
@@ -206,8 +238,8 @@ export default function PetProfileScreen() {
       ]
     );
   };
-  
-  if (isLoading) {
+
+  if (isLoading || !feederId) { // Also show loading if feederId isn't ready
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color={COLORS.primary} />
@@ -248,7 +280,7 @@ export default function PetProfileScreen() {
 
         <Text style={styles.label}>Sex / Neuter Status</Text>
         <SegmentedControl options={['Neutered/Spayed', 'Intact']} selected={neuterStatus} onSelect={setNeuterStatus} />
-        
+
         <Text style={styles.label}>Activity Level</Text>
         <SegmentedControl options={['Low', 'Normal', 'High']} selected={activityLevel} onSelect={setActivityLevel} />
 
@@ -261,7 +293,7 @@ export default function PetProfileScreen() {
         <TouchableOpacity style={styles.saveButton} onPress={handleSave}>
           <Text style={styles.saveButtonText}>{isEditing ? 'Update Pet' : 'Save Pet'}</Text>
         </TouchableOpacity>
-        
+
         {isEditing && (
           <TouchableOpacity style={styles.deleteButton} onPress={handleDelete}>
             <Text style={styles.deleteButtonText}>Delete Pet</Text>

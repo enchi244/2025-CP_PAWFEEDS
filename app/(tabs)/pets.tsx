@@ -1,6 +1,7 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { collection, getDocs, onSnapshot, query, Unsubscribe, where } from 'firebase/firestore';
+// 1. Import native firestore types (optional but good practice)
+import { FirebaseFirestoreTypes } from '@react-native-firebase/firestore';
 import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
@@ -14,6 +15,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../context/AuthContext';
+// 2. Import native db instance
 import { db } from '../../firebaseConfig';
 
 const COLORS = {
@@ -31,6 +33,9 @@ interface Pet {
   photoUrl: string;
 }
 
+// 3. Define the Unsubscribe type
+type Unsubscribe = () => void;
+
 export default function PetsScreen() {
   const router = useRouter();
   const [pets, setPets] = useState<Pet[]>([]);
@@ -47,20 +52,29 @@ export default function PetsScreen() {
 
     const fetchPets = async () => {
       try {
-        const feedersRef = collection(db, 'feeders');
-        const q = query(feedersRef, where('owner_uid', '==', user.uid));
-        const querySnapshot = await getDocs(q);
+        // 4. Use native firestore syntax
+        const feedersRef = db.collection('feeders');
+        const q = feedersRef.where('owner_uid', '==', user.uid);
+        const querySnapshot = await q.get();
 
         if (!querySnapshot.empty) {
           const feederDoc = querySnapshot.docs[0];
           const feederId = feederDoc.id;
-          const petsCollectionRef = collection(db, 'feeders', feederId, 'pets');
-          
-          unsubscribe = onSnapshot(petsCollectionRef, (snapshot) => {
-            const petsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Pet));
-            setPets(petsData);
-            setLoading(false);
-          });
+          // 5. Use native firestore syntax
+          const petsCollectionRef = db.collection('feeders').doc(feederId).collection('pets');
+
+          // 6. Use native firestore onSnapshot syntax
+          unsubscribe = petsCollectionRef.onSnapshot(
+            (snapshot: FirebaseFirestoreTypes.QuerySnapshot) => { // Explicitly type snapshot
+              const petsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Pet));
+              setPets(petsData);
+              setLoading(false);
+            },
+            (error) => { // Add error handler
+              console.error("Pets onSnapshot error:", error);
+              setLoading(false);
+            }
+          );
         } else {
           setPets([]);
           setLoading(false);
@@ -81,7 +95,7 @@ export default function PetsScreen() {
       params: { id: 'new' }
     });
   };
-  
+
   const handleEditPet = (petId: string) => {
     router.push({
       pathname: "/pet/[id]",
@@ -91,7 +105,7 @@ export default function PetsScreen() {
 
   const renderPetItem: ListRenderItem<Pet> = ({ item }) => (
     <TouchableOpacity style={styles.petItem} onPress={() => handleEditPet(item.id)}>
-      <Image source={{ uri: item.photoUrl }} style={styles.petPhoto} />
+      <Image source={{ uri: item.photoUrl || undefined }} style={styles.petPhoto} />
       <Text style={styles.petName}>{item.name}</Text>
     </TouchableOpacity>
   );

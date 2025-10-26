@@ -26,7 +26,7 @@
       ],
       "package": "com.enchi244.pawfeedsapp",
       "useCleartextTraffic": true,
-      "googleServicesFile": "./google-services.json"
+      "googleServicesFile": "./google-services.json" // Make sure this points to your root file
     },
     "web": {
       "bundler": "metro",
@@ -36,13 +36,9 @@
     "plugins": [
       "expo-router",
       "expo-secure-store",
-      "@react-native-firebase/app",
-      [
-        "expo-notifications",
-        {
-          "googleServicesFile": "./google-services.json"
-        }
-      ]
+      "@react-native-firebase/app", // Must be first Firebase plugin
+      "@react-native-firebase/messaging"
+      // Add other @react-native-firebase plugins here if needed (e.g., auth, firestore - though they often don't strictly need plugins if only app is present)
     ],
     "experiments": {
       "typedRoutes": true

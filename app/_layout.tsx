@@ -1,43 +1,93 @@
-import * as Notifications from 'expo-notifications';
+import messaging, { FirebaseMessagingTypes } from '@react-native-firebase/messaging';
 import { SplashScreen, Stack } from 'expo-router';
-import { doc, updateDoc } from 'firebase/firestore';
 import React, { useEffect } from 'react';
 import { Alert } from 'react-native';
 import { AuthProvider, useAuth } from '../context/AuthContext';
+// db is now the native firestore instance
 import { db } from '../firebaseConfig';
-import { registerForPushNotificationsAsync } from '../utils/notifications'; // 1. Import
 
-// --- 2. Set the handler for how notifications are presented ---
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
-});
+/**
+ * Handles saving the push token to the user's document in Firestore.
+ */
+async function saveTokenToUser(uid: string, token: string) {
+  try {
+    const userRef = db.collection('users').doc(uid);
+    await userRef.update({
+      pushToken: token,
+    });
+    console.log('Push token saved to user document.');
+  } catch (error) {
+    console.error('Error saving push token to Firestore:', error);
+  }
+}
 
-// --- 3. Handle Notification Response (user taps "Feed Now") ---
-const handleNotificationResponse = async (response: Notifications.NotificationResponse) => {
-  const { actionIdentifier } = response;
-  const { feederId, pendingFeedId } = response.notification.request.content.data as { feederId: string, pendingFeedId: string };
+/**
+ * Requests permission and gets the FCM token.
+ */
+async function registerForPushNotificationsAsync(uid: string) {
+  try {
+    const authStatus = await messaging().requestPermission();
+    const enabled =
+      authStatus === messaging.AuthorizationStatus.AUTHORIZED ||
+      authStatus === messaging.AuthorizationStatus.PROVISIONAL;
 
-  if (actionIdentifier === 'feedNow') {
-    if (!feederId || !pendingFeedId) {
-      Alert.alert("Error", "Notification data is missing. Cannot dispense feed.");
-      return;
+    if (enabled) {
+      const token = await messaging().getToken();
+      console.log('FCM Token:', token);
+      await saveTokenToUser(uid, token);
+    } else {
+      Alert.alert(
+        'Push Notifications Disabled',
+        'Please enable push notifications in settings to receive feeding alerts.'
+      );
     }
-    
-    try {
-      // This triggers the `onPendingFeedTrigger` cloud function
-      const pendingFeedRef = doc(db, 'feeders', feederId, 'pendingFeeds', pendingFeedId);
-      await updateDoc(pendingFeedRef, {
-        status: 'triggered',
-      });
-      Alert.alert("Success", "Feed command sent!");
-    } catch (error) {
-      console.error("Error triggering feed from notification:", error);
-      Alert.alert("Error", "Could not send feed command.");
-    }
+  } catch (error) {
+    console.error('Error during push notification registration:', error);
+    Alert.alert(
+      'Registration Error',
+      'An error occurred while registering for push notifications.'
+    );
+  }
+}
+
+/**
+ * Handles triggering the feed when a notification is opened.
+ * This function is now triggered by onNotificationOpenedApp.
+ */
+const handleNotificationTrigger = async (remoteMessage: FirebaseMessagingTypes.RemoteMessage) => {
+  console.log(
+    'Notification caused app to open from background state:',
+    remoteMessage
+  );
+
+  const { feederId, pendingFeedId } = remoteMessage.data as {
+    feederId: string;
+    pendingFeedId: string;
+  };
+
+  // We assume opening the notification means the user wants to feed.
+  // The 'feedNow' action identifier no longer exists in this SDK.
+  if (!feederId || !pendingFeedId) {
+    Alert.alert('Error', 'Notification data is missing. Cannot dispense feed.');
+    return;
+  }
+
+  try {
+    // This triggers the `onPendingFeedTrigger` cloud function
+    // Use native Firestore syntax
+    const pendingFeedRef = db
+      .collection('feeders')
+      .doc(feederId)
+      .collection('pendingFeeds')
+      .doc(pendingFeedId);
+      
+    await pendingFeedRef.update({
+      status: 'triggered',
+    });
+    Alert.alert('Success', 'Feed command sent!');
+  } catch (error) {
+    console.error('Error triggering feed from notification:', error);
+    Alert.alert('Error', 'Could not send feed command.');
   }
 };
 
@@ -56,25 +106,40 @@ function RootLayoutNav() {
 
   // --- 4. Add Notification Logic ---
   useEffect(() => {
-    // If user is authenticated, register for push notifications
     if (user) {
+      // If user is authenticated, register for push notifications
       registerForPushNotificationsAsync(user.uid);
+
+      // --- Listener for when a notification is received while app is foregrounded ---
+      const unsubscribeOnMessage = messaging().onMessage(async (remoteMessage) => {
+        console.log('Notification received in foreground:', remoteMessage);
+        Alert.alert(
+          remoteMessage.notification?.title || 'Notification',
+          remoteMessage.notification?.body || 'You have a new message.'
+        );
+      });
+
+      // --- Listener for when user interacts with a notification (taps it) ---
+      // This handles when the app is in the background or quit
+      const unsubscribeOnNotificationOpened = messaging().onNotificationOpenedApp(
+        handleNotificationTrigger
+      );
+
+      // Check if app was opened from a quit state by a notification
+      messaging()
+        .getInitialNotification()
+        .then((remoteMessage) => {
+          if (remoteMessage) {
+            handleNotificationTrigger(remoteMessage);
+          }
+        });
+
+      // Cleanup listeners
+      return () => {
+        unsubscribeOnMessage();
+        unsubscribeOnNotificationOpened();
+      };
     }
-
-    // Listener for when user interacts with a notification (e.g., taps "Feed Now")
-    const responseSubscription = Notifications.addNotificationResponseReceivedListener(handleNotificationResponse);
-    
-    // Listener for when a notification is received while app is foregrounded
-    const notificationSubscription = Notifications.addNotificationReceivedListener(notification => {
-      // You can add logic here if needed
-      console.log("Notification received:", notification);
-    });
-
-    // Cleanup listeners
-    return () => {
-      responseSubscription.remove();
-      notificationSubscription.remove();
-    };
   }, [user]); // Re-run when user object changes
 
   // Render nothing while the auth state is loading. The splash screen will be visible.
@@ -89,8 +154,14 @@ function RootLayoutNav() {
       <Stack.Screen name="login" options={{ headerShown: false }} />
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       <Stack.Screen name="(provisioning)" options={{ headerShown: false }} />
-      <Stack.Screen name="pet/[id]" options={{ headerShown: false, presentation: 'modal' }} />
-      <Stack.Screen name="schedule/[id]" options={{ headerShown: false, presentation: 'modal' }} />
+      <Stack.Screen
+        name="pet/[id]"
+        options={{ headerShown: false, presentation: 'modal' }}
+      />
+      <Stack.Screen
+        name="schedule/[id]"
+        options={{ headerShown: false, presentation: 'modal' }}
+      />
     </Stack>
   );
 }
