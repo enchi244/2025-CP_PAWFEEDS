@@ -25,7 +25,8 @@
         "android.permission.ACCESS_FINE_LOCATION"
       ],
       "package": "com.enchi244.pawfeedsapp",
-      "useCleartextTraffic": true
+      "useCleartextTraffic": true,
+      "googleServicesFile": "./google-services.json"
     },
     "web": {
       "bundler": "metro",
@@ -34,7 +35,14 @@
     },
     "plugins": [
       "expo-router",
-      "expo-secure-store"
+      "expo-secure-store",
+      "@react-native-firebase/app",
+      [
+        "expo-notifications",
+        {
+          "googleServicesFile": "./google-services.json"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
