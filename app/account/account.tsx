@@ -1,30 +1,22 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-// 1. Import native auth types and EmailAuthProvider
-import auth, { EmailAuthProvider, FirebaseAuthTypes } from '@react-native-firebase/auth';
-// 2. Import native firestore types
-import { FirebaseFirestoreTypes } from '@react-native-firebase/firestore';
+import { EmailAuthProvider, getAuth, onAuthStateChanged, reauthenticateWithCredential, updatePassword, User } from 'firebase/auth';
+import { collection, onSnapshot } from 'firebase/firestore';
 import React, { useEffect, useState } from 'react';
 import {
-  ActivityIndicator,
-  Alert,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
+    ActivityIndicator,
+    Alert,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-// 3. Import native db instance (we don't need the auth instance directly here)
 import { db } from '../../firebaseConfig';
 
 const COLORS = { primary: '#8C6E63', accent: '#FFC107', background: '#F5F5F5', text: '#333333', lightGray: '#E0E0E0', white: '#FFFFFF', danger: '#D32F2F', overlay: 'rgba(0, 0, 0, 0.4)' };
-
-// 4. Define the Unsubscribe type
-type Unsubscribe = () => void;
-// 5. Use the correct User type
-type User = FirebaseAuthTypes.User | null;
 
 export default function AccountScreen() {
   const router = useRouter();
@@ -36,47 +28,33 @@ export default function AccountScreen() {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    let unsubscribePets: Unsubscribe = () => {};
-    let unsubscribeSchedules: Unsubscribe = () => {};
-
-    // 6. Use the imported native auth instance
-    const authInstance = auth();
-    const unsubscribeAuth = authInstance.onAuthStateChanged((authUser) => {
+    let unsubscribePets = () => {};
+    let unsubscribeSchedules = () => {};
+    
+    const auth = getAuth();
+    const unsubscribeAuth = onAuthStateChanged(auth, (authUser) => {
       setUser(authUser);
       if (authUser) {
         // Now that we have the user, fetch their data
-        // TODO: Dynamically fetch feederId instead of hardcoding
         const feederId = 'eNFJODJ5YP1t3lw77WJG';
-
+        
         try {
-          // 7. Use native firestore syntax
-          const petsCollectionRef = db.collection('feeders').doc(feederId).collection('pets');
-          const schedulesCollectionRef = db.collection('feeders').doc(feederId).collection('schedules');
-
-          // 8. Use native onSnapshot syntax with explicit types and error handlers
-          unsubscribePets = petsCollectionRef.onSnapshot(
-            (querySnapshot: FirebaseFirestoreTypes.QuerySnapshot) => {
-              setPetCount(querySnapshot.size);
-            },
-            (error) => {
-              console.error('Error fetching pet count:', error);
-            }
-          );
-
-          unsubscribeSchedules = schedulesCollectionRef.onSnapshot(
-            (querySnapshot: FirebaseFirestoreTypes.QuerySnapshot) => {
-              setScheduleCount(querySnapshot.size);
-            },
-            (error) => {
-              console.error('Error fetching schedule count:', error);
-            }
-          );
+          const petsCollectionRef = collection(db, 'feeders', feederId, 'pets');
+          const schedulesCollectionRef = collection(db, 'feeders', feederId, 'schedules');
+  
+          unsubscribePets = onSnapshot(petsCollectionRef, (querySnapshot) => {
+            setPetCount(querySnapshot.size);
+          });
+  
+          unsubscribeSchedules = onSnapshot(schedulesCollectionRef, (querySnapshot) => {
+            setScheduleCount(querySnapshot.size);
+          });
 
         } catch (error) {
-          console.error('Error setting up listeners:', error);
+          console.error('Error fetching user data:', error);
           Alert.alert('Error', 'Could not fetch account data.');
         } finally {
-          setIsLoading(false); // Set loading false after setup attempt
+          setIsLoading(false);
         }
 
       } else {
@@ -98,29 +76,20 @@ export default function AccountScreen() {
       Alert.alert('Error', 'Password must be at least 6 characters long.');
       return;
     }
-
+    
     // Perform null checks on the user object before proceeding
     if (user && user.email && currentPassword) {
       setIsLoading(true);
       try {
-        // 9. Use native EmailAuthProvider
         const credential = EmailAuthProvider.credential(user.email, currentPassword);
-        // 10. Use native reauthenticateWithCredential and updatePassword methods
-        await user.reauthenticateWithCredential(credential);
-        await user.updatePassword(newPassword);
+        await reauthenticateWithCredential(user, credential);
+        await updatePassword(user, newPassword);
         Alert.alert('Success', 'Your password has been changed.');
         setNewPassword('');
         setCurrentPassword('');
-      } catch (error: any) { // Catch as any to access error properties
+      } catch (error) {
         console.error('Error changing password:', error);
-        // Provide more specific error messages if possible
-        let errorMessage = 'Failed to change password. Please ensure your current password is correct and you have recently logged in.';
-        if (error.code === 'auth/wrong-password') {
-            errorMessage = 'Incorrect current password provided.';
-        } else if (error.code === 'auth/requires-recent-login') {
-            errorMessage = 'This operation requires you to have recently signed in. Please log out and log back in.';
-        }
-        Alert.alert('Error', errorMessage);
+        Alert.alert('Error', 'Failed to change password. Please ensure your current password is correct and you have recently logged in.');
       } finally {
         setIsLoading(false);
       }

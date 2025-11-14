@@ -1,8 +1,7 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-// 1. Import native firestore types
-import { FirebaseFirestoreTypes } from '@react-native-firebase/firestore';
+import { collection, deleteDoc, doc, DocumentData, getDoc, getDocs, query, where, writeBatch } from 'firebase/firestore';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -20,9 +19,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../context/AuthContext';
-// 2. Import native db instance
 import { db } from '../../firebaseConfig';
-import { recalculatePortionsForPet } from '../../utils/portionLogic'; // Ensure this is also updated if needed
+import { recalculatePortionsForPet } from '../../utils/portionLogic'; // 1. Import our utility function
 
 const COLORS = {
   primary: '#8C6E63',
@@ -42,10 +40,8 @@ interface Pet {
   id: string;
   name: string;
   recommendedPortion: number;
+  bowlNumber: number; // <-- 1. EDITED INTERFACE
 }
-
-// 3. Define the Unsubscribe type
-type Unsubscribe = () => void;
 
 const parseTimeString = (timeString: string | undefined): Date => {
   const now = new Date();
@@ -71,7 +67,7 @@ export default function ScheduleProfileScreen() {
   const [date, setDate] = useState(new Date());
   const [showTimePicker, setShowTimePicker] = useState(false);
   const [selectedDays, setSelectedDays] = useState<number[]>([]);
-
+  
   const [pets, setPets] = useState<Pet[]>([]);
   const [selectedPet, setSelectedPet] = useState<Pet | null>(null);
   const [selectedBowl, setSelectedBowl] = useState<number | null>(null);
@@ -80,7 +76,7 @@ export default function ScheduleProfileScreen() {
   const [isBowlModalVisible, setBowlModalVisible] = useState(false);
 
   const [isLoading, setIsLoading] = useState(true);
-
+  
   const [feederId, setFeederId] = useState<string | null>(null);
 
   const bowls = useMemo(() => [{ id: 1, name: 'Bowl 1' }, { id: 2, name: 'Bowl 2' }], []);
@@ -92,21 +88,14 @@ export default function ScheduleProfileScreen() {
         router.back();
         return;
       }
-      try {
-        // Use native firestore syntax
-        const feedersRef = db.collection('feeders');
-        const q = feedersRef.where('owner_uid', '==', user.uid);
-        const querySnapshot = await q.get();
-        if (!querySnapshot.empty) {
-          setFeederId(querySnapshot.docs[0].id);
-        } else {
-          Alert.alert('No Feeder Found', 'Could not find a feeder associated with your account.');
-          router.back();
-        }
-      } catch (error) {
-          console.error("Error fetching feeder ID:", error);
-          Alert.alert('Error', 'Could not verify feeder status.');
-          router.back();
+      const feedersRef = collection(db, 'feeders');
+      const q = query(feedersRef, where('owner_uid', '==', user.uid));
+      const querySnapshot = await getDocs(q);
+      if (!querySnapshot.empty) {
+        setFeederId(querySnapshot.docs[0].id);
+      } else {
+        Alert.alert('No Feeder Found', 'Could not find a feeder associated with your account.');
+        router.back();
       }
     };
     fetchFeederId();
@@ -114,53 +103,47 @@ export default function ScheduleProfileScreen() {
 
   useEffect(() => {
     const fetchInitialData = async () => {
-
+      
       if (!feederId) {
         setIsLoading(false); // Ensure loading stops if there's no feederId
         return;
       }
 
       try {
-        // Use native firestore syntax
-        const petsCollectionRef = db.collection('feeders').doc(feederId).collection('pets');
-        const q = petsCollectionRef; // Query stays the same
-        const querySnapshot = await q.get();
+        const petsCollectionRef = collection(db, 'feeders', feederId, 'pets');
+        const q = query(petsCollectionRef);
+        const querySnapshot = await getDocs(q);
         const petsData: Pet[] = [];
-        // Use native firestore snapshot iteration
-        querySnapshot.forEach((doc: FirebaseFirestoreTypes.QueryDocumentSnapshot) => { // Explicit type
+        
+        // --- 2. EDITED FETCH LOGIC ---
+        querySnapshot.forEach((doc: DocumentData) => {
+          const data = doc.data();
           petsData.push({
             id: doc.id,
-            name: doc.data().name,
-            recommendedPortion: doc.data().recommendedPortion || 0,
+            name: data.name,
+            recommendedPortion: data.recommendedPortion || 0,
+            bowlNumber: data.bowlNumber || 1, // Read the bowl number here
           } as Pet);
         });
         setPets(petsData);
 
-        if (isEditing && id) { // Only fetch if feederId is available
-          // Use native firestore syntax
-          const scheduleDocRef = db.collection('feeders').doc(feederId).collection('schedules').doc(id);
-          // Use native get() and explicitly type snapshot
-          const docSnap: FirebaseFirestoreTypes.DocumentSnapshot = await scheduleDocRef.get();
-
-          // ***** START FIX *****
-          // Try calling exists() as a method to satisfy the linter
+        if (isEditing && id && feederId) { // Only fetch if feederId is available
+          const scheduleDocRef = doc(db, 'feeders', feederId, 'schedules', id);
+          const docSnap = await getDoc(scheduleDocRef);
           if (docSnap.exists()) {
-          // ***** END FIX *****
-            const data = docSnap.data() as FirebaseFirestoreTypes.DocumentData; // Cast data
+            const data = docSnap.data();
             setName(data.name || '');
             setDate(parseTimeString(data.time));
 
             if (data.repeatDays && Array.isArray(data.repeatDays)) {
-                const dayIndices = data.repeatDays.map(dayLetter => STORAGE_DAYS.indexOf(dayLetter)).filter(index => index !== -1);
+                const dayIndices = data.repeatDays.map((dayLetter: string) => STORAGE_DAYS.indexOf(dayLetter)).filter((index: number) => index !== -1);
                 setSelectedDays(dayIndices);
             }
-
+            
+            // Use the more reliable petId to find the selected pet
             const pet = petsData.find(p => p.id === data.petId);
             setSelectedPet(pet || null);
             setSelectedBowl(data.bowlNumber || null);
-          } else {
-              Alert.alert('Error', 'Schedule not found.');
-              router.back();
           }
         }
       } catch (error) {
@@ -170,9 +153,9 @@ export default function ScheduleProfileScreen() {
         setIsLoading(false);
       }
     };
-
+    
     fetchInitialData();
-  }, [id, isEditing, feederId, router]); // Depend on feederId and router
+  }, [id, isEditing, feederId]); // Depend on feederId
 
 
   const onTimeChange = (event: DateTimePickerEvent, selectedDate?: Date) => {
@@ -186,15 +169,16 @@ export default function ScheduleProfileScreen() {
 
   const formatTime = (dateToFormat: Date) => {
     if (isNaN(dateToFormat.getTime())) {
-        return 'Select a time';
+      // This case should ideally not be hit with the new logic
+      return 'Select a time';
     }
     return dateToFormat.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
   };
-
+  
   const handleDayPress = (dayIndex: number) => {
-    setSelectedDays(prevDays =>
-      prevDays.includes(dayIndex)
-        ? prevDays.filter(d => d !== dayIndex)
+    setSelectedDays(prevDays => 
+      prevDays.includes(dayIndex) 
+        ? prevDays.filter(d => d !== dayIndex) 
         : [...prevDays, dayIndex]
     );
   };
@@ -208,7 +192,7 @@ export default function ScheduleProfileScreen() {
       Alert.alert('Error', 'Feeder ID not found. Cannot save schedule.');
       return;
     }
-
+    
     setIsLoading(true);
 
     const pad = (num: number) => num.toString().padStart(2, '0');
@@ -226,14 +210,13 @@ export default function ScheduleProfileScreen() {
     };
 
     try {
-      // Use native firestore batch
-      const batch = db.batch();
-      const schedulesRef = db.collection('feeders').doc(feederId).collection('schedules');
+      const batch = writeBatch(db);
+      const schedulesRef = collection(db, 'feeders', feederId, 'schedules');
 
       // Get all existing enabled schedules for the pet
-      const q = schedulesRef.where('petId', '==', selectedPet.id).where('isEnabled', '==', true);
-      const querySnapshot = await q.get();
-
+      const q = query(schedulesRef, where('petId', '==', selectedPet.id), where('isEnabled', '==', true));
+      const querySnapshot = await getDocs(q);
+      
       // Filter out the current schedule if we are editing it, as it will be replaced
       const existingSchedules = querySnapshot.docs.filter(doc => doc.id !== id);
       const totalSchedules = existingSchedules.length + 1; // +1 for the one we are saving
@@ -241,7 +224,6 @@ export default function ScheduleProfileScreen() {
 
       // Update all existing schedules with the new portion
       existingSchedules.forEach(scheduleDoc => {
-        // Use native batch update syntax
         batch.update(scheduleDoc.ref, { portionGrams: newPortion });
       });
 
@@ -249,16 +231,13 @@ export default function ScheduleProfileScreen() {
       scheduleData.portionGrams = newPortion;
 
       if (isEditing && id) {
-        // Use native firestore syntax
-        const scheduleDocRef = db.collection('feeders').doc(feederId).collection('schedules').doc(id);
-        // Use native batch update syntax
+        const scheduleDocRef = doc(db, 'feeders', feederId, 'schedules', id);
         batch.update(scheduleDocRef, scheduleData);
       } else {
-         // Use native firestore syntax and batch set
-        const newScheduleRef = db.collection('feeders').doc(feederId).collection('schedules').doc(); // Generate ID client-side for batch
+        const newScheduleRef = doc(collection(db, 'feeders', feederId, 'schedules'));
         batch.set(newScheduleRef, scheduleData);
       }
-
+      
       await batch.commit();
       Alert.alert(isEditing ? 'Schedule Updated' : 'Schedule Saved', 'All related feeding portions have been recalculated.');
       router.back();
@@ -276,19 +255,17 @@ export default function ScheduleProfileScreen() {
       `Are you sure you want to delete the "${name}" schedule?`,
       [
         { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
+        { 
+          text: 'Delete', 
+          style: 'destructive', 
           onPress: async () => {
             if (isEditing && id && selectedPet && feederId) { // Ensure we have a pet and feederId to update
-              setIsLoading(true);
+              setIsLoading(true); // <-- This is the line (262) that had the typo
               try {
-                // Use native firestore syntax
-                const scheduleDocRef = db.collection('feeders').doc(feederId).collection('schedules').doc(id);
-                await scheduleDocRef.delete();
-
-                // Trigger portion recalculation after deleting
-                // Ensure recalculatePortionsForPet expects petId only (matching previous fix)
+                const scheduleDocRef = doc(db, 'feeders', feederId, 'schedules', id);
+                await deleteDoc(scheduleDocRef);
+                
+                // 5. Trigger portion recalculation after deleting
                 await recalculatePortionsForPet(selectedPet.id);
 
                 Alert.alert('Schedule Deleted');
@@ -299,8 +276,6 @@ export default function ScheduleProfileScreen() {
               } finally {
                 setIsLoading(false);
               }
-            } else {
-                Alert.alert('Error', 'Missing information to delete schedule.');
             }
           }
         },
@@ -308,7 +283,7 @@ export default function ScheduleProfileScreen() {
     );
   };
 
-  if (isLoading || !feederId) { // Also loading if feederId is not ready
+  if (isLoading) {
     return <View style={styles.loadingContainer}><ActivityIndicator size="large" color={COLORS.primary} /></View>;
   }
 
@@ -329,7 +304,7 @@ export default function ScheduleProfileScreen() {
         <TouchableOpacity style={styles.input} onPress={() => setShowTimePicker(true)}>
             <Text style={styles.timeText}>{formatTime(date)}</Text>
         </TouchableOpacity>
-
+        
         {Platform.OS === 'android' && showTimePicker && (
           <DateTimePicker value={date} mode="time" is24Hour={false} display="default" onChange={onTimeChange} />
         )}
@@ -338,12 +313,12 @@ export default function ScheduleProfileScreen() {
             <Modal visible={showTimePicker} transparent={true} animationType="fade">
                 <View style={styles.modalBackdrop}>
                     <View style={[styles.modalContent, { backgroundColor: colorScheme === 'dark' ? '#333' : COLORS.background }]}>
-                        <DateTimePicker
-                            value={date}
-                            mode="time"
-                            is24Hour={false}
-                            display="spinner"
-                            onChange={onTimeChange}
+                        <DateTimePicker 
+                            value={date} 
+                            mode="time" 
+                            is24Hour={false} 
+                            display="spinner" 
+                            onChange={onTimeChange} 
                             textColor={colorScheme === 'dark' ? COLORS.white : COLORS.text}
                             themeVariant={colorScheme ?? 'light'}
                         />
@@ -354,11 +329,11 @@ export default function ScheduleProfileScreen() {
                 </View>
             </Modal>
         )}
-
+        
         <Text style={styles.label}>Repeat on Days</Text>
         <View style={styles.daySelectorContainer}>
           {DISPLAY_DAYS.map((day, index) => (
-            <TouchableOpacity
+            <TouchableOpacity 
               key={index}
               style={[styles.dayButton, selectedDays.includes(index) && styles.dayButtonSelected]}
               onPress={() => handleDayPress(index)}
@@ -385,7 +360,7 @@ export default function ScheduleProfileScreen() {
         <TouchableOpacity style={styles.saveButton} onPress={handleSave}>
           <Text style={styles.saveButtonText}>{isEditing ? 'Update Schedule' : 'Save Schedule'}</Text>
         </TouchableOpacity>
-
+        
         {isEditing && (
           <TouchableOpacity style={styles.deleteButton} onPress={handleDelete}>
             <Text style={styles.deleteButtonText}>Delete Schedule</Text>
@@ -401,7 +376,12 @@ export default function ScheduleProfileScreen() {
                     data={pets}
                     keyExtractor={(item) => item.id}
                     renderItem={({ item }) => (
-                        <TouchableOpacity style={styles.selectionItem} onPress={() => { setSelectedPet(item); setPetModalVisible(false); }}>
+                        // --- 3. EDITED ONPRESS HANDLER ---
+                        <TouchableOpacity style={styles.selectionItem} onPress={() => {
+                          setSelectedPet(item);
+                          setSelectedBowl(item.bowlNumber); // This auto-selects the bowl
+                          setPetModalVisible(false);
+                        }}>
                             <Text style={styles.selectionItemText}>{item.name}</Text>
                         </TouchableOpacity>
                     )}
@@ -427,7 +407,7 @@ export default function ScheduleProfileScreen() {
                         </TouchableOpacity>
                     )}
                 />
-                 <TouchableOpacity style={styles.cancelButton} onPress={() => setBowlModalVisible(false)}>
+                <TouchableOpacity style={styles.cancelButton} onPress={() => setBowlModalVisible(false)}>
                     <Text style={styles.cancelButtonText}>Cancel</Text>
                 </TouchableOpacity>
             </View>

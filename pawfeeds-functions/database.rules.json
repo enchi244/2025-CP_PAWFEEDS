@@ -1,0 +1,18 @@
+{
+  "rules": {
+    "user_notifications": {
+      "$uid": {
+        ".read": "auth != null && auth.uid == $uid",
+        ".write": "auth != null && auth.uid == $uid",
+
+        ".indexOn": "timestamp"
+      }
+    },
+    "commands": {
+      "$feederId": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    }
+  }
+}

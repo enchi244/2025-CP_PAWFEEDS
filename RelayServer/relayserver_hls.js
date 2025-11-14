@@ -1,151 +1,94 @@
-const http = require('http');
-const express = require('express');
-const fs = require('fs-extra');
-const path = require('path');
+/*
+ * =================================================================
+ * PAWFEEDS HLS PUSH SERVER
+ * =================================================================
+ * This server's only job is to connect to the local ESP32 cameras
+ * and "push" their streams to a public RTMP server.
+ * It is no longer an "on-demand" HLS server.
+ * =================================================================
+ */
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegStatic = require('ffmpeg-static');
-const os = require('os');
 
 // --- CONFIGURATION ---
-const PORT = 8080;
-const CAMERA_IPS = {
-  1: 'http://192.168.1.183', // IP for Bowl 1 Camera
-  2: 'http://192.168.1.187', // IP for Bowl 2 Camera
-};
-const HLS_OUTPUT_DIR = path.join(__dirname, 'hls');
 
-const app = express();
-const server = http.createServer(app);
-const activeStreams = new Map();
+// (REQUIRED) SET YOUR PUBLIC SERVER'S IP OR DOMAIN
+// Make sure your public server is configured to accept RTMP on port 1935.
+const PUBLIC_SERVER_IP = '134.209.100.91';
+
+const RTMP_BASE_URL = `rtmp://${PUBLIC_SERVER_IP}:1935/live`; // 'live' is a common app name in nginx-rtmp
+
+const CAMERA_SOURCES = {
+  // Key: The "stream key" to push to. e.g., rtmp://.../live/stream1
+  // Value: The local IP of the camera.
+  'stream1': 'http://192.168.1.183/stream', // Bowl 1 Camera
+};
+
+// FFmpeg settings for a stable MJPEG -> RTMP push
+const FFMPEG_OPTIONS = [
+  '-fflags +discardcorrupt', // Skip bad frames
+  '-g 10',                   // Keyframe every 10 frames (1 per sec)
+  '-c:v libx264',            // Use libx264 codec
+  '-preset ultrafast',       // Prioritize low-CPU
+  '-tune zerolatency',       // Optimize for live streaming
+  '-profile:v baseline',     // <-- ADDED FOR MAX COMPATIBILITY
+  '-pix_fmt yuv420p',        // Standard pixel format for compatibility
+  '-an',                     // No audio
+  '-f flv'                   // Force format to FLV (standard for RTMP)
+];
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
-fs.emptyDirSync(HLS_OUTPUT_DIR);
-console.log(`[Relay] Cleaned HLS output directory: ${HLS_OUTPUT_DIR}`);
+console.log('[RelayPusher] PawFeeds Relay Pusher starting...');
 
-// --- MIDDLEWARE ---
-app.use((req, res, next) => {
-  console.log(`[Relay] Request Received: ${req.method} ${req.url} from ${req.socket.remoteAddress}`);
-  next();
-});
-app.use(express.static(HLS_OUTPUT_DIR)); // Serve the HLS files
+/**
+ * Creates and starts a persistent ffmpeg process for a camera.
+ * If the process ends or errors, it will log and restart after a delay.
+ * @param {string} streamKey - The RTMP stream key (e.g., "stream1")
+ * @param {string} cameraUrl - The local URL of the MJPEG stream
+ */
+function startStreamProcess(streamKey, cameraUrl) {
+  const outputUrl = `${RTMP_BASE_URL}/${streamKey}`;
+  console.log(`\n======================================================`);
+  console.log(`[DEBUG ${streamKey}] ATTEMPTING TO START STREAM PROCESS`);
+  console.log(`[DEBUG ${streamKey}] Source: ${cameraUrl}`);
+  console.log(`[DEBUG ${streamKey}] Destination: ${outputUrl}`);
+  console.log(`======================================================\n`);
 
-// --- ROUTES ---
-app.get('/', (req, res) => {
-  res.status(200).send('PawFeeds Relay Server is running and accessible.');
-});
-
-app.get('/stream/:bowlNumber', (req, res) => {
-  const { bowlNumber } = req.params;
-  const cameraIp = CAMERA_IPS[bowlNumber];
-  const outputDir = path.join(HLS_OUTPUT_DIR, bowlNumber);
-  const manifestPath = path.join(outputDir, 'index.m3u8');
-
-  if (!cameraIp) {
-    console.error(`[Relay] ERROR: Request for invalid bowl number: ${bowlNumber}`);
-    return res.status(404).send(`Camera for bowl ${bowlNumber} not found.`);
-  }
-
-  if (activeStreams.has(bowlNumber)) {
-    console.log(`[Relay] Stream for bowl ${bowlNumber} is already active.`);
-    // The stream is active, so the manifest *should* exist. Respond immediately.
-    return res.status(200).send(`Stream for bowl ${bowlNumber} is already active.`);
-  }
-
-  console.log(`[Relay] Starting HLS stream for bowl ${bowlNumber} from camera at ${cameraIp}/stream`);
-  fs.ensureDirSync(outputDir);
-
-  // --- We need to capture these variables for the error handler ---
-  let watcher = null; // Declare watcher here to be accessible in all scopes
-  let ffmpegProcess = null; // Declare process here
-
-  const clearWatcher = () => {
-    if (watcher) {
-      clearInterval(watcher);
-      watcher = null;
-    }
-  };
-
-  ffmpegProcess = ffmpeg(`${cameraIp}/stream`, { timeout: 43200 })
-    // --- SOLUTION 1: Specify input codec correctly ---
-    .inputOption('-c:v mjpeg')
-    .addOptions([
-      // '-c:v mjpeg', // Removed from here
-      '-hls_time 2',
-      '-hls_list_size 5',
-      '-hls_flags delete_segments',
-      '-g 10',
-      '-c:v libx264',
-      '-preset ultrafast',
-      '-tune zerolatency',
-      '-pix_fmt yuv420p',
-      '-an',
-    ])
-    .output(manifestPath)
+  const ffmpegProcess = ffmpeg(cameraUrl, { timeout: 43200 })
+    // --- STABILITY FIXES for MJPEG Input ---
+    .inputFormat('mjpeg') // Tell ffmpeg the input is MJPEG
+    .inputFPS(10)         // Match camera's 10fps
+    .inputOption('-re')   // Read at native frame rate
+    // --- Output Options ---
+    .addOptions(FFMPEG_OPTIONS)
+    .output(outputUrl)
     .on('start', (commandLine) => {
-      console.log(`[FFmpeg Bowl ${bowlNumber}] Successfully spawned.`);
+      console.log(`[FFmpeg ${streamKey}] Spawned. Command: ${commandLine}`);
     })
     .on('error', (err, stdout, stderr) => {
-      console.error(`[FFmpeg Bowl ${bowlNumber}] FATAL ERROR: ${err.message}`);
-      console.error(`[FFmpeg Bowl ${bowlNumber}] STDERR:\n${stderr}`);
-      activeStreams.delete(bowlNumber);
-      clearWatcher(); // Clear the watcher on error
-      if (!res.headersSent) {
-        res.status(500).send('Failed to start FFmpeg process.');
-      }
+      console.error(`[FFmpeg ${streamKey}] FATAL ERROR: ${err.message}`);
+      console.error(`[FFmpeg ${streamKey}] STDERR:\n${stderr}`);
+      console.log(`[FFmpeg ${streamKey}] Restarting in 10 seconds...`);
+      setTimeout(() => startStreamProcess(streamKey, cameraUrl), 10000);
     })
-    .on('end', () => {
-      console.log(`[FFmpeg Bowl ${bowlNumber}] Stream processing finished.`);
-      activeStreams.delete(bowlNumber);
-      clearWatcher(); // Clear the watcher on end
+    .on('end', (stdout, stderr) => {
+      console.log(`[FFmpeg ${streamKey}] Stream finished (this shouldn't happen).`);
+      console.log(`[FFmpeg ${streamKey}] Restarting in 10 seconds...`);
+      setTimeout(() => startStreamProcess(streamKey, cameraUrl), 10000);
     });
 
+  // Run the process
   ffmpegProcess.run();
-  activeStreams.set(bowlNumber, ffmpegProcess);
-
-  // --- SOLUTION 2: Increase timeout to 30 seconds ---
-  const timeout = 30000; // 30 seconds
-  const interval = 100; // Check every 100ms
-  let timeElapsed = 0;
-
-  watcher = setInterval(() => {
-    if (fs.existsSync(manifestPath)) {
-      clearWatcher();
-      if (!res.headersSent) {
-        console.log(`[Relay] Manifest for bowl ${bowlNumber} created. Sending 200 OK.`);
-        res.status(200).send(`Stream initiation for bowl ${bowlNumber} successful.`);
-      }
-    } else {
-      timeElapsed += interval;
-      if (timeElapsed > timeout) {
-        clearWatcher();
-        console.error(`[Relay] Timeout: Manifest for bowl ${bowlNumber} not created after ${timeout/1000}s.`);
-        if (ffmpegProcess) {
-          ffmpegProcess.kill('SIGKILL'); // Kill the hung process
-        }
-        activeStreams.delete(bowlNumber);
-        if (!res.headersSent) {
-          res.status(500).send('FFmpeg process timed out, failed to create manifest.');
-        }
-      }
-    }
-  }, interval);
-});
-
-// --- SERVER START ---
-function getLocalIpAddress() {
-    const interfaces = os.networkInterfaces();
-    for (const name of Object.keys(interfaces)) {
-        for (const iface of interfaces[name] || []) {
-            if (iface.family === 'IPv4' && !iface.internal) {
-                return iface.address;
-            }
-        }
-    }
-    return '0.0.0.0';
 }
 
-server.listen(PORT, () => {
-  const ipAddress = getLocalIpAddress();
-  console.log(`[PawFeeds Relay] HLS Relay Server listening on port ${PORT}`);
-  console.log(`[PawFeeds Relay] Network access at: http://${ipAddress}:${PORT}`);
-});
+// --- MAIN ---
+// Start a persistent ffmpeg process for each camera defined in the config
+try {
+  for (const [key, url] of Object.entries(CAMERA_SOURCES)) {
+    startStreamProcess(key, url);
+  }
+} catch (error) {
+  console.error('[RelayPusher] CRITICAL: Failed to initialize streams.', error);
+  // In a production environment, you might want to exit and let a process manager (like PM2) restart.
+  // process.exit(1);
+}

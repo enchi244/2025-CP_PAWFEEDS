@@ -1,6 +1,14 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useState } from 'react';
-import { ActivityIndicator, Alert, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Alert,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 
 const PairingScreen = () => {
   const router = useRouter();
@@ -10,33 +18,56 @@ const PairingScreen = () => {
 
   const handlePairDevice = async () => {
     if (!password) {
-      Alert.alert('Password Required', 'Please enter the password for the Wi-Fi network.');
+      Alert.alert(
+        'Password Required',
+        'Please enter the password for the Wi-Fi network.',
+      );
       return;
     }
     setIsLoading(true);
 
+    // ** FIX: Implement AbortController for a long timeout (60 seconds) **
+    const controller = new AbortController();
+    // ===================================================================
+    // === You can change this value to be even longer if needed (e.g., 90000 for 90s)
+    // ===================================================================
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60-second timeout
+
     try {
-      // ** FIX: Replaced placeholder logic with a real API call to send credentials **
       const response = await fetch('http://192.168.4.1/save', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
         },
         // Encode the data in the required format
-        body: `ssid=${encodeURIComponent(ssid)}&pass=${encodeURIComponent(password)}&uid=${encodeURIComponent(uid)}`,
+        body: `ssid=${encodeURIComponent(ssid)}&pass=${encodeURIComponent(
+          password,
+        )}&uid=${encodeURIComponent(uid)}`,
+        signal: controller.signal, // Pass the signal to the fetch request
       });
 
       if (!response.ok) {
         throw new Error(`Device responded with status: ${response.status}`);
       }
-      
-      // If successful, the ESP32 will restart. We navigate to the completion screen.
-      router.replace('/(provisioning)/complete');
 
-    } catch (error) {
+      // If successful, the ESP32 will restart. We navigate to the completion screen
+      // which will handle waiting for the device to come online.
+      router.replace('/(provisioning)/complete');
+    } catch (error: any) {
       console.error('Pairing failed:', error);
-      Alert.alert('Pairing Failed', 'Could not send credentials to the feeder. Please ensure you are still connected to the "PawFeeds_Setup" Wi-Fi and try again.');
+      if (error.name === 'AbortError') {
+        Alert.alert(
+          'Pairing Timed Out',
+          'Could not get a confirmation from the feeder. Please ensure you are still connected to the "PawFeeds_Setup" Wi-Fi, check the password, and try again.',
+        );
+      } else {
+        Alert.alert(
+          'Pairing Failed',
+          'Could not send credentials to the feeder. Please ensure you are still connected to the "PawFeeds_Setup" Wi-Fi and try again.',
+        );
+      }
     } finally {
+      clearTimeout(timeoutId); // Clear the timeout
       setIsLoading(false);
     }
   };

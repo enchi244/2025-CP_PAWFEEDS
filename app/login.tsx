@@ -1,6 +1,5 @@
 import { useRouter } from 'expo-router'; // 1. Import the router
-// 1. REMOVE old JS SDK imports
-// import { createUserWithEmailAndPassword, signInWithEmailAndPassword } from 'firebase/auth';
+import { signInWithEmailAndPassword } from 'firebase/auth';
 import React, { useState } from 'react';
 import {
   ActivityIndicator,
@@ -13,7 +12,6 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-// 2. Import the native auth instance, which is now correct
 import { auth } from '../firebaseConfig';
 
 const COLORS = {
@@ -26,7 +24,7 @@ const COLORS = {
 };
 
 export default function LoginScreen() {
-  const router = useRouter();
+  const router = useRouter(); // 2. Initialize the router
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -38,34 +36,11 @@ export default function LoginScreen() {
     }
     setLoading(true);
     try {
-      // 3. Use the native auth instance and its methods
-      await auth.signInWithEmailAndPassword(email, password);
-      
-      // Manually navigate on success. This is the fix.
+      await signInWithEmailAndPassword(auth, email, password);
+      // 3. Manually navigate on success. This is the fix.
       router.replace('/(tabs)');
     } catch (error: any) {
-      // 4. Handle native Firebase errors
-      Alert.alert('Login Failed', error.message || 'An unknown error occurred');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleCreateAccount = async () => {
-    if (!email || !password) {
-      Alert.alert('Missing Fields', 'Please enter both email and password to create an account.');
-      return;
-    }
-    setLoading(true);
-    try {
-      // 5. Use the native auth instance and its methods
-      await auth.createUserWithEmailAndPassword(email, password);
-      
-      // Also navigate after creating an account
-      router.replace('/(tabs)');
-    } catch (error: any) {
-      // 6. Handle native Firebase errors
-      Alert.alert('Sign Up Failed', error.message || 'An unknown error occurred');
+      Alert.alert('Login Failed', error.message);
     } finally {
       setLoading(false);
     }
@@ -75,9 +50,12 @@ export default function LoginScreen() {
     Alert.alert(
       'Google Sign-In Pressed',
       'Firebase Google Sign-In logic will go here.'
-      // Note: This will also require a new native implementation
-      // using @react-native-google-signin/google-signin
     );
+  };
+  
+  // NEW: Navigate to the sign up screen
+  const handleGoToSignUp = () => {
+    router.push('/signup'); // Use push to allow navigation back
   };
 
   return (
@@ -125,9 +103,11 @@ export default function LoginScreen() {
             disabled={loading}>
             <Text style={styles.buttonSecondaryText}>Sign in with Google</Text>
           </TouchableOpacity>
+          
+          {/* MODIFIED: This button now navigates to the sign up screen */}
           <TouchableOpacity
             style={styles.buttonSecondary}
-            onPress={handleCreateAccount}
+            onPress={handleGoToSignUp} 
             disabled={loading}>
             <Text style={styles.buttonSecondaryText}>Create an Account</Text>
           </TouchableOpacity>
