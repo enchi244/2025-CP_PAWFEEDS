@@ -1,25 +1,18 @@
-/*
- * Full file: enchi244/pawfeeds-app/pawfeeds-app-b1723b3842afb3d3d24ec3981b9ba1017b0b304c/pawfeeds-functions/functions/src/index.ts
- *
- * UPDATED:
- * - scheduledFeedChecker now sends "await_rfid" command with pet's tag ID.
- * - Added a generic push notification helper.
- * - onFeederStatusUpdate includes "refill" logic.
- */
-
 import { Expo, ExpoPushMessage } from "expo-server-sdk";
 import { initializeApp } from "firebase-admin/app";
-import { getDatabase, ServerValue } from "firebase-admin/database";
-import { FieldValue, getFirestore, Timestamp } from "firebase-admin/firestore"; // <-- Added FieldValue
+import { getAuth } from "firebase-admin/auth";
+import { DataSnapshot, getDatabase, ServerValue } from "firebase-admin/database";
+import { FieldValue, getFirestore, Timestamp } from "firebase-admin/firestore";
 import * as logger from "firebase-functions/logger";
+import { DatabaseEvent, onValueCreated } from "firebase-functions/v2/database";
 import { onDocumentUpdated } from "firebase-functions/v2/firestore";
-import { onRequest, Request } from "firebase-functions/v2/https";
-import { onSchedule } from "firebase-functions/v2/scheduler";
+import { HttpsError, onCall, onRequest, Request } from "firebase-functions/v2/https";
+import { onSchedule, ScheduledEvent } from "firebase-functions/v2/scheduler";
 
 // Initialize Firebase Admin SDK
 initializeApp();
 const firestore = getFirestore();
-const rtdb = getDatabase(); // Existing RTDB admin instance
+const rtdb = getDatabase(); 
 
 // Initialize Expo SDK
 const expo = new Expo();
@@ -30,12 +23,30 @@ interface RegisterFeederRequest {
   owner_uid: string;
 }
 
+// Define the structure for Schedule data to ensure type safety in Firestore operations
+interface ScheduleData {
+  time: string;
+  repeatDays: string[];
+  petId: string;
+  bowlNumber: number;
+  portionGrams: number;
+  isEnabled: boolean; 
+}
+
+// Define structure for creating a user
+interface CreateUserRequest {
+  email: string;
+  password: string;
+  firstName: string;
+  lastName: string;
+}
+
 /**
  * HTTP Cloud Function to register a new feeder device.
  */
 export const registerFeeder = onRequest(
   { region: "asia-southeast1", cors: true },
-  async (req: Request, res) => {
+  async (req: Request, res: any) => {
     if (req.method !== "POST") {
       res.status(405).send("Method Not Allowed");
       return;
@@ -75,22 +86,20 @@ export const registerFeeder = onRequest(
 
 /**
  * Scheduled Cloud Function that runs every minute to check all schedules.
- *
- * UPDATED: Now sends an "await_rfid" command instead of a direct "feed" command.
- * It fetches the pet's registered RFID tag and sends it with the command.
  */
 export const scheduledFeedChecker = onSchedule(
   {
     schedule: "every 1 minutes",
-    timeZone: "Asia/Singapore", // PHT is GMT+8, same as Singapore
+    timeZone: "Asia/Singapore", 
     region: "asia-southeast1",
   },
-  async (event) => {
+  async (event: ScheduledEvent) => { 
     logger.info("Running scheduled feed checker...");
 
     const now = new Date();
     const timeZone = "Asia/Singapore";
     
+    // --- TIME FORMATTING ---
     const formatterHour = new Intl.DateTimeFormat('en-US', { hour: '2-digit', hour12: false, timeZone });
     const formatterMinute = new Intl.DateTimeFormat('en-US', { minute: '2-digit', timeZone });
     
@@ -100,10 +109,32 @@ export const scheduledFeedChecker = onSchedule(
     const currentMinute = formatterMinute.format(now).padStart(2, '0');
     const currentTime = `${formattedHour}:${currentMinute}`;
     
-    const dayMap = ["U", "M", "T", "W", "R", "F", "S"];
-    const currentDay = dayMap[now.getDay()];
+    // --- DAY FORMATTING (FIXED) ---
+    // Previously used now.getDay() which is UTC. 
+    // Now we force the day retrieval to respect the Singapore Timezone.
+    const dayFormatter = new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone }); 
+    const currentDayShort = dayFormatter.format(now); // "Sun", "Mon", "Tue"...
 
-    logger.info(`Current time in ${timeZone}: ${currentTime}, Day: ${currentDay}`);
+    // Map 'short' weekday names to your specific App codes:
+    // U=Sunday, M=Monday, T=Tuesday, W=Wednesday, R=Thursday, F=Friday, S=Saturday
+    const dayMap: { [key: string]: string } = {
+      "Sun": "U",
+      "Mon": "M",
+      "Tue": "T",
+      "Wed": "W",
+      "Thu": "R",
+      "Fri": "F",
+      "Sat": "S"
+    };
+
+    const currentDay = dayMap[currentDayShort];
+
+    if (!currentDay) {
+        logger.error(`Could not determine current day from '${currentDayShort}'`);
+        return;
+    }
+
+    logger.info(`Current time in ${timeZone}: ${currentTime}, Day: ${currentDay} (Raw: ${currentDayShort})`);
 
     try {
       const feedersSnapshot = await firestore.collection("feeders").get();
@@ -128,12 +159,11 @@ export const scheduledFeedChecker = onSchedule(
           }
 
           for (const scheduleDoc of scheduleSnapshot.docs) {
-            const schedule = scheduleDoc.data();
+            const schedule = scheduleDoc.data() as ScheduleData;
             
             if (schedule.time === currentTime && schedule.repeatDays && schedule.repeatDays.includes(currentDay)) {
               logger.info(`MATCH FOUND: Triggering schedule ${scheduleDoc.id} for feeder ${feederId}`);
 
-              // --- NEW RFID LOGIC ---
               // 1. Get the pet's RFID tag from their profile
               const petId = schedule.petId;
               if (!petId) {
@@ -149,7 +179,10 @@ export const scheduledFeedChecker = onSchedule(
                 continue;
               }
 
-              const rfidTagId = petDoc.data()?.rfidTagId;
+              const petData = petDoc.data();
+              const rfidTagId = petData?.rfidTagId;
+              const petName = petData?.name || "Unknown Pet";
+
               if (!rfidTagId) {
                 logger.warn(`Pet ${petId} has no rfidTagId. Skipping schedule ${scheduleDoc.id}.`);
                 continue;
@@ -157,21 +190,33 @@ export const scheduledFeedChecker = onSchedule(
               
               // 2. Send command to RTDB for the feeder to *await* that tag
               const command = {
-                command: "await_rfid", // <-- NEW COMMAND
+                command: "await_rfid", 
                 bowl: schedule.bowlNumber,
                 amount: schedule.portionGrams,
-                expectedTagId: rfidTagId, // <-- NEW FIELD
+                expectedTagId: rfidTagId, 
                 timestamp: ServerValue.TIMESTAMP,
+                scheduleId: scheduleDoc.id, 
+                petId: petId, 
               };
 
               const commandRef = rtdb.ref(`commands/${feederId}`);
-              commandRef.set(command).catch((err) => {
+              commandRef.set(command).catch((err: unknown) => { 
                 logger.error(`Failed to send await_rfid command to feeder ${feederId} for schedule ${scheduleDoc.id}`, err);
               });
 
+              // --- LOGGING: Create a history entry ---
+              const historyRef = firestore.collection("feeders").doc(feederId).collection("history");
+              historyRef.add({
+                type: 'scheduled',
+                amount: schedule.portionGrams,
+                bowlNumber: schedule.bowlNumber,
+                petName: petName,
+                timestamp: FieldValue.serverTimestamp()
+              }).catch(err => logger.error(`Failed to log history for feeder ${feederId}`, err));
+
+
               // 3. Send push notification to the owner to let them know the feeder is "waiting"
               if (ownerUid) {
-                const petName = petDoc.data()?.name || "your pet";
                 const title = `Waiting for ${petName}...`;
                 const body = `Feeder is now waiting for ${petName} at Bowl ${schedule.bowlNumber}.`;
                 // We make this non-blocking
@@ -180,7 +225,7 @@ export const scheduledFeedChecker = onSchedule(
               }
             }
           }
-        }).catch(err => {
+        }).catch((err: unknown) => { 
             logger.error(`Error querying schedules for feeder ${feederId}:`, err);
         });
         promises.push(promise);
@@ -195,120 +240,475 @@ export const scheduledFeedChecker = onSchedule(
   }
 );
 
+
+// ==========================================================
+// --- Feeder Timeout Handler ---
+// ==========================================================
+
 /**
- * --- UPDATED FUNCTION ---
+ * Realtime Database trigger that fires when the feeder reports a timeout.
+ */
+export const onFeederTimeout = onValueCreated(
+  {
+    ref: "/feeder_timeout_events/{feederId}/{eventKey}",
+    region: "asia-southeast1",
+  },
+  async (event: DatabaseEvent<DataSnapshot>) => { 
+    const feederId = event.params.feederId;
+    const timeoutEvent = event.data.val();
+    
+    // The feeder must send the IDs back to Firebase
+    const { scheduleId, petId } = timeoutEvent;
+
+    if (!scheduleId || !petId) {
+      logger.error("Timeout event missing scheduleId or petId. Deleting record.", timeoutEvent);
+      await event.data.ref.remove();
+      return;
+    }
+
+    logger.info(`Feeder timeout detected for schedule ${scheduleId} on feeder ${feederId}.`);
+
+    // 1. Get ownerUid and petName for notification
+    const feederDoc = await firestore.collection("feeders").doc(feederId).get();
+    const ownerUid = feederDoc.data()?.owner_uid;
+
+    if (!ownerUid) {
+      logger.error(`Owner not found for feeder ${feederId}. Cannot send notification.`);
+      await event.data.ref.remove();
+      return;
+    }
+    
+    const petDocRef = firestore.collection("feeders").doc(feederId).collection("pets").doc(petId);
+    const petDoc = await petDocRef.get();
+    const petName = petDoc.data()?.name || "your pet";
+
+    // 2. Send the "No Dog Close" notification
+    const title = `⚠️ ${petName} missed their meal.`;
+    const body = `Feeder timeout: No RFID detected for ${petName}'s scheduled meal. Tap to skip meal.`;
+    
+    // Pass scheduleId to the app so it can call the 'skipScheduledMeal' function
+    const data = {
+      screen: "home",
+      action: "missed_meal_notification",
+      scheduleId: scheduleId,
+    };
+    
+    // Send a non-blocking notification
+    sendGenericPushNotification(ownerUid, title, body, data)
+      .catch(err => logger.error(`Failed to send timeout notification for ${ownerUid}`, err));
+
+    // 3. Delete the RTDB record to clean up and prevent re-triggering.
+    await event.data.ref.remove();
+
+    logger.info(`Feeder timeout handler finished for schedule ${scheduleId}.`);
+  }
+);
+
+
+// ==========================================================
+// --- Skip Meal Backend Logic ---
+// ==========================================================
+
+/**
+ * Callable Cloud Function to handle the "Skip Meal" action.
+ */
+export const skipScheduledMeal = onCall(
+  { region: "asia-southeast1" },
+  async (request) => {
+    const { scheduleId } = request.data;
+    const uid = request.auth?.uid;
+
+    if (!uid) {
+      throw new HttpsError("unauthenticated", "The user must be logged in to skip a meal.");
+    }
+    if (!scheduleId) {
+      throw new HttpsError("invalid-argument", "Missing scheduleId.");
+    }
+
+    logger.info(`User ${uid} requested to skip schedule ${scheduleId}.`);
+
+    try {
+      // 1. Find the feeder ID for the owner
+      const feedersRef = firestore.collection("feeders");
+      const qFeeder = feedersRef.where("owner_uid", "==", uid).limit(1);
+      const feederSnapshot = await qFeeder.get();
+
+      if (feederSnapshot.empty) {
+        throw new HttpsError("not-found", "No feeder associated with the user.");
+      }
+      const feederId = feederSnapshot.docs[0].id;
+      const schedulesRef = firestore.collection("feeders").doc(feederId).collection("schedules");
+      const scheduleDocRef = schedulesRef.doc(scheduleId);
+      const scheduleDoc = await scheduleDocRef.get();
+
+      if (!scheduleDoc.exists) {
+        throw new HttpsError("not-found", `Schedule ${scheduleId} not found.`);
+      }
+
+      // Use the ScheduleData interface here
+      const scheduleData = scheduleDoc.data() as ScheduleData | undefined;
+      const petId = scheduleData?.petId;
+
+      if (!petId) {
+          throw new HttpsError("failed-precondition", `Schedule ${scheduleId} is not linked to a pet.`);
+      }
+      
+      // If already disabled, we don't need to do anything
+      if (scheduleData?.isEnabled === false) {
+          logger.warn(`Schedule ${scheduleId} is already disabled. Skipping update.`);
+          return { status: "success", message: `Schedule ${scheduleId} was already disabled.` };
+      }
+
+      // 2. Fetch pet's recommended portion
+      const petDocRef = firestore.collection("feeders").doc(feederId).collection("pets").doc(petId);
+      const petSnap = await petDocRef.get();
+      if (!petSnap.exists || !petSnap.data()?.recommendedPortion) {
+        throw new HttpsError("failed-precondition", `Pet ${petId} not found or missing recommendedPortion.`);
+      }
+      const recommendedPortion = petSnap.data()?.recommendedPortion || 0;
+
+      // 3. Determine new enabled count and portion for recalculation
+      const q = schedulesRef.where("petId", "==", petId);
+      const querySnapshot = await q.get();
+
+      const currentEnabledCount = querySnapshot.docs.filter(
+        doc => (doc.data() as ScheduleData)?.isEnabled === true
+      ).length; 
+      
+      const newEnabledCount = currentEnabledCount > 1 ? currentEnabledCount - 1 : 0;
+      
+      const newPortion = newEnabledCount > 0 ? Math.round(recommendedPortion / newEnabledCount) : 0;
+
+      // 4. Batch update all schedules for the pet
+      const batch = firestore.batch();
+
+      querySnapshot.docs.forEach(docSnapshot => {
+        const docRef = docSnapshot.ref;
+        const isCurrentDoc = docSnapshot.id === scheduleId;
+        const currentData = docSnapshot.data() as ScheduleData;
+        const currentIsEnabled = currentData?.isEnabled;
+
+        if (isCurrentDoc) {
+          // Disable the skipped schedule and set its portion to 0
+          batch.update(docRef, { isEnabled: false, portionGrams: 0 });
+        } else if (currentIsEnabled) {
+          // Update all other currently active schedules with the new, increased portion
+          batch.update(docRef, { portionGrams: newPortion });
+        }
+      });
+
+      await batch.commit();
+
+      logger.info(`Successfully skipped and disabled schedule ${scheduleId}. New portion per meal: ${newPortion}g`);
+      return { status: "success", message: `Meal skipped and schedule ${scheduleId} disabled.` };
+
+    } catch (error) {
+      logger.error(`Error skipping scheduled meal ${scheduleId}:`, error);
+      
+      if (error instanceof HttpsError) {
+        throw error;
+      }
+      throw new HttpsError("internal", "An unexpected error occurred while processing the skip request.");
+    }
+  }
+);
+
+
+// ==========================================================
+// --- ADMIN: Create User Account ---
+// ==========================================================
+
+export const createUserAccount = onCall(
+  { region: "asia-southeast1" },
+  async (request) => {
+    // 1. Security Check: Ensure caller is an Admin
+    const requesterUid = request.auth?.uid;
+    if (!requesterUid) {
+      throw new HttpsError("unauthenticated", "You must be logged in.");
+    }
+
+    const userDoc = await firestore.collection("users").doc(requesterUid).get();
+    if (!userDoc.exists || !userDoc.data()?.isAdmin) {
+      throw new HttpsError("permission-denied", "Only admins can create accounts.");
+    }
+
+    const { email, password, firstName, lastName } = request.data as CreateUserRequest;
+
+    if (!email || !password || !firstName || !lastName) {
+      throw new HttpsError("invalid-argument", "Missing required fields.");
+    }
+
+    try {
+      // 2. Create Auth User
+      const userRecord = await getAuth().createUser({
+        email,
+        password,
+        displayName: `${firstName} ${lastName}`,
+      });
+
+      // 3. Create Firestore Profile
+      await firestore.collection("users").doc(userRecord.uid).set({
+        uid: userRecord.uid,
+        firstName,
+        lastName,
+        email: email.toLowerCase(),
+        createdAt: Timestamp.now(),
+        isAdmin: false, // Default to false, promote later if needed
+      });
+
+      logger.info(`Admin ${requesterUid} created user ${userRecord.uid}`);
+      return { status: "success", uid: userRecord.uid, message: "User created successfully." };
+
+    } catch (error: any) {
+      logger.error("Error creating user:", error);
+      throw new HttpsError("internal", error.message || "Failed to create user.");
+    }
+  }
+);
+
+
+// ==========================================================
+// --- NEW FEATURE: Pet Milestone Checker (Daily at 9 AM) ---
+// ==========================================================
+
+export const checkPetMilestones = onSchedule(
+  {
+    schedule: "every day 09:00", 
+    timeZone: "Asia/Singapore",
+    region: "asia-southeast1",
+  },
+  async (event) => {
+    logger.info("Running daily pet milestone checker...");
+
+    try {
+      // 1. Query ALL pets across ALL feeders using a Collection Group Query
+      const petsSnapshot = await firestore.collectionGroup("pets").get();
+
+      if (petsSnapshot.empty) {
+        logger.info("No pets found in database.");
+        return;
+      }
+
+      const promises: Promise<any>[] = [];
+      const today = new Date();
+
+      for (const petDoc of petsSnapshot.docs) {
+        const petData = petDoc.data();
+        const birthdayTimestamp = petData.birthday;
+
+        // Skip if no birthday set
+        if (!birthdayTimestamp) continue;
+
+        // 2. Calculate Age in Months
+        const birthDate = birthdayTimestamp.toDate();
+        let months = (today.getFullYear() - birthDate.getFullYear()) * 12;
+        months -= birthDate.getMonth();
+        months += today.getMonth();
+        // Adjust if the specific day hasn't passed yet in the current month
+        if (today.getDate() < birthDate.getDate()) {
+          months--;
+        }
+
+        // 3. Check Milestones
+        // We use a 'flags' array in the doc so we don't spam them every day of that month
+        const notifiedMilestones = petData.notifiedMilestones || [];
+        let alertTitle = "";
+        let alertBody = "";
+        let newMilestoneTag = "";
+
+        // --- Milestone A: 4 Months (Rapid -> Slow Growth) ---
+        if (months === 4 && !notifiedMilestones.includes("4mo")) {
+          newMilestoneTag = "4mo";
+          alertTitle = `🐶 ${petData.name} is 4 months old!`;
+          alertBody = "Growth spurts change! Your puppy's calorie needs are shifting. Please check their weight profile to adjust portions.";
+        }
+        
+        // --- Milestone B: 12 Months (Puppy -> Adult) ---
+        else if (months === 12 && !notifiedMilestones.includes("12mo")) {
+          newMilestoneTag = "12mo";
+          alertTitle = `🎂 Happy 1st Birthday ${petData.name}!`;
+          alertBody = `${petData.name} is officially an adult! Their metabolism has slowed down. Please update their profile to 'Adult' settings to prevent overfeeding.`;
+        }
+
+        // 4. Execute Notification & Update
+        if (newMilestoneTag) {
+          logger.info(`Triggering milestone ${newMilestoneTag} for pet ${petDoc.id} (${petData.name})`);
+
+          // A. Get the parent Feeder to find the Owner UID
+          // Structure: feeders/{feederId}/pets/{petId}
+          const feederRef = petDoc.ref.parent.parent; 
+          
+          if (feederRef) {
+            const p = feederRef.get().then(async (feederSnap) => {
+              const ownerUid = feederSnap.data()?.owner_uid;
+              
+              if (ownerUid) {
+                // B. Send Push Notification
+                await sendGenericPushNotification(ownerUid, alertTitle, alertBody, { screen: "pet_profile", petId: petDoc.id });
+                
+                // C. Update the Pet Document so we don't notify again
+                await petDoc.ref.update({
+                  notifiedMilestones: FieldValue.arrayUnion(newMilestoneTag)
+                });
+              }
+            });
+            promises.push(p);
+          }
+        }
+      }
+
+      await Promise.all(promises);
+      logger.info("Milestone check complete.");
+
+    } catch (error) {
+      logger.error("Error in checkPetMilestones:", error);
+    }
+  }
+);
+
+
+// ==========================================================
+// --- EXISTING HELPER FUNCTIONS ---
+// ==========================================================
+
+/**
+ * Realtime Database trigger that fires when the feeder reports an EMPTY or JAM error.
+ */
+export const onFeederError = onValueCreated(
+  {
+    ref: "/feeder_errors/{feederId}/{eventKey}",
+    region: "asia-southeast1",
+  },
+  async (event: DatabaseEvent<DataSnapshot>) => {
+    const feederId = event.params.feederId;
+    const errorEvent = event.data.val();
+    const { bowl } = errorEvent; 
+
+    logger.info(`Feeder error detected for feeder ${feederId}:`, errorEvent);
+
+    // 1. Get ownerUid to know who to notify
+    const feederDoc = await firestore.collection("feeders").doc(feederId).get();
+    const ownerUid = feederDoc.data()?.owner_uid;
+
+    if (!ownerUid) {
+      logger.error(`Owner not found for feeder ${feederId}. Cannot send notification.`);
+      await event.data.ref.remove();
+      return;
+    }
+
+    // 2. Send the Critical Alert Notification
+    const title = "⚠️ Feeder Jammed or Empty";
+    const body = `Bowl ${bowl} could not dispense food. The container might be empty or jammed. Please check it immediately.`;
+
+    const data = {
+      screen: "home",
+      action: "feeder_error",
+      bowl: String(bowl)
+    };
+
+    await sendGenericPushNotification(ownerUid, title, body, data)
+      .catch(err => logger.error(`Failed to send error notification for ${ownerUid}`, err));
+
+    // 3. Delete the RTDB record to clean up and prevent re-triggering
+    await event.data.ref.remove();
+    logger.info(`Feeder error notification sent and record cleaned for ${feederId}.`);
+  }
+);
+
+// ==========================================================
+// --- [NEW] Hunger Alert Handler ---
+// ==========================================================
+
+/**
+ * Realtime Database trigger that fires when the feeder reports 3 unscheduled scans.
+ */
+export const onHungerAlert = onValueCreated(
+  {
+    ref: "/feeder_hunger_alerts/{feederId}/{eventKey}",
+    region: "asia-southeast1",
+  },
+  async (event: DatabaseEvent<DataSnapshot>) => {
+    const feederId = event.params.feederId;
+    const alertData = event.data.val();
+    const { bowl, tagId } = alertData;
+
+    logger.info(`Hunger alert detected for feeder ${feederId}:`, alertData);
+
+    // 1. Get ownerUid 
+    const feederDoc = await firestore.collection("feeders").doc(feederId).get();
+    const ownerUid = feederDoc.data()?.owner_uid;
+
+    if (!ownerUid) {
+      logger.error(`Owner not found for feeder ${feederId}. Cannot send notification.`);
+      await event.data.ref.remove();
+      return;
+    }
+
+    // 2. Try to identify the pet name from the tagId
+    let petName = "A pet";
+    if (tagId) {
+      const petsRef = firestore.collection("feeders").doc(feederId).collection("pets");
+      const q = petsRef.where("rfidTagId", "==", tagId).limit(1);
+      const petSnapshot = await q.get();
+      
+      if (!petSnapshot.empty) {
+        petName = petSnapshot.docs[0].data().name || "A pet";
+      }
+    }
+
+    // 3. Send the Hunger Notification
+    const title = `🐶 ${petName} might be hungry!`;
+    const body = `${petName} has scanned Bowl ${bowl} multiple times without an active schedule.`;
+
+    const data = {
+      screen: "home",
+      action: "hunger_alert",
+      bowl: String(bowl)
+    };
+
+    await sendGenericPushNotification(ownerUid, title, body, data)
+      .catch(err => logger.error(`Failed to send hunger notification for ${ownerUid}`, err));
+
+    // 4. Delete the RTDB record to clean up and prevent re-triggering
+    await event.data.ref.remove();
+    logger.info(`Hunger alert notification sent and record cleaned for ${feederId}.`);
+  }
+);
+
+/**
  * Firestore trigger that fires when a feeder document is updated.
- * Used to check for low food levels and send notifications.
- *
- * NOW INCLUDES REFILL LOGIC to reset the notification cooldown.
  */
 export const onFeederStatusUpdate = onDocumentUpdated(
   { document: "feeders/{feederId}", region: "asia-southeast1" },
-  async (event) => {
-    if (!event.data) {
-      logger.info("No data in event, exiting.");
-      return;
-    }
+  async (event) => { 
+    // This function acts as a placeholder now since we removed the notifications.
+    // We keep the basic checks so the code remains valid and ready for future features.
+
+    if (!event.data) return;
 
     const beforeData = event.data.before.data();
     const afterData = event.data.after.data();
 
-    // If data is missing, exit
-    if (!beforeData || !afterData) {
-      logger.info("Missing before or after data, exiting.");
-      return;
-    }
+    if (!beforeData || !afterData) return;
 
     const beforeFoodLevels = beforeData.foodLevels;
     const afterFoodLevels = afterData.foodLevels;
-    const ownerUid = afterData.owner_uid;
-
-    // Exit if crucial data is missing
-    if (!afterFoodLevels || !ownerUid) {
-      logger.warn("Feeder data missing foodLevels or owner_uid.", { uid: ownerUid, levels: afterFoodLevels });
-      return;
+    
+    // Just logging for debugging purposes
+    if (JSON.stringify(beforeFoodLevels) !== JSON.stringify(afterFoodLevels)) {
+       logger.info(`Food levels updated for ${event.params.feederId}`, afterFoodLevels);
     }
 
-    // Exit if foodLevels didn't actually change
-    if (JSON.stringify(beforeFoodLevels) === JSON.stringify(afterFoodLevels)) {
-      logger.info("foodLevels did not change. Exiting.");
-      return;
-    }
-
-    const LOW_FOOD_THRESHOLD = 20;
-    const NOTIFICATION_COOLDOWN_MINUTES = 60; 
-
-    const promises: Promise<any>[] = [];
-    let updatesToFeederDoc: { [key: string]: any } = {}; // To batch updates
-
-    // Check each bowl's food level
-    for (const bowl in afterFoodLevels) {
-      const beforeLevel = beforeFoodLevels[bowl] ?? 100;
-      const afterLevel = afterFoodLevels[bowl];
-
-      // --- 1. LOW FOOD LOGIC ---
-      // Check if the food level just dropped below the threshold
-      if (beforeLevel > LOW_FOOD_THRESHOLD && afterLevel <= LOW_FOOD_THRESHOLD) {
-        logger.info(`LOW FOOD DETECTED: Feeder ${event.params.feederId}, Bowl ${bowl} is at ${afterLevel}%. Notifying owner ${ownerUid}.`);
-
-        // --- Cooldown Check ---
-        const lastNotified = afterData.lowFoodNotifiedAt?.[bowl]?.toMillis() ?? 0;
-        const now = Timestamp.now().toMillis();
-        const minutesSinceLastNotified = (now - lastNotified) / (1000 * 60);
-
-        if (minutesSinceLastNotified > NOTIFICATION_COOLDOWN_MINUTES) {
-          logger.info(`Cooldown passed. Sending notification for Bowl ${bowl}.`);
-          
-          // 1. Send the notification
-          promises.push(
-            sendLowFoodNotification(ownerUid, parseInt(bowl, 10), afterLevel)
-              .catch(err => logger.error(`Failed to send low food push notification for ${ownerUid}`, err))
-          );
-
-          // 2. Add the cooldown timestamp to our batch update
-          updatesToFeederDoc[`lowFoodNotifiedAt.${bowl}`] = Timestamp.now();
-        } else {
-          logger.info(`Cooldown active for Feeder ${event.params.feederId}, Bowl ${bowl}. Not sending notification.`);
-        }
-      } 
-      
-      // ==========================================================
-      // --- 2. NEW REFILL LOGIC ---
-      // ==========================================================
-      // Check if the food level just went from LOW to HIGH (a refill)
-      else if (beforeLevel <= LOW_FOOD_THRESHOLD && afterLevel > LOW_FOOD_THRESHOLD) {
-        logger.info(`REFILL DETECTED: Feeder ${event.params.feederId}, Bowl ${bowl} is at ${afterLevel}%. Resetting notification cooldown.`);
-
-        // We only need to reset the cooldown if a timestamp exists
-        if (afterData.lowFoodNotifiedAt?.[bowl]) {
-          // Add the "delete timestamp" command to our batch update
-          // We use dot notation to delete a specific field in a map
-          updatesToFeederDoc[`lowFoodNotifiedAt.${bowl}`] = FieldValue.delete();
-        }
-      }
-    }
-
-    // --- 3. BATCH UPDATE ---
-    // If we have any updates to make (either setting or deleting timestamps),
-    // perform one single update operation.
-    if (Object.keys(updatesToFeederDoc).length > 0) {
-      promises.push(
-        event.data.after.ref.update(updatesToFeederDoc)
-          .catch(err => logger.error(`Failed to update cooldown timestamps for ${ownerUid}`, err))
-      );
-    }
-
-    await Promise.all(promises);
+    // --- NOTIFICATION LOGIC REMOVED HERE --- 
+    return;
   }
 );
 
 
 /**
  * Helper function to send a generic push notification to a user.
- * (This is a refactored version of your original sendPushNotification)
  */
 async function sendGenericPushNotification(uid: string, title: string, body: string, data: { [key: string]: string }) {
-  // --- 1. Write to Realtime Database to trigger local notification ---
   try {
     const notificationRef = rtdb.ref(`user_notifications/${uid}`).push();
     await notificationRef.set({
@@ -322,7 +722,6 @@ async function sendGenericPushNotification(uid: string, title: string, body: str
     logger.error(`Error sending RTDB notification message to ${uid}:`, rtdbError);
   }
 
-  // --- 2. Attempt to send Expo Push Notification ---
   try {
     const userDocRef = firestore.collection("users").doc(uid);
     const userDoc = await userDocRef.get();
@@ -364,18 +763,4 @@ async function sendGenericPushNotification(uid: string, title: string, body: str
   } catch (error) {
     logger.error(`Error sending Expo push notification to ${uid}:`, error);
   }
-}
-
-
-
-/**
- * Helper function to send a LOW FOOD push notification to a user.
- */
-async function sendLowFoodNotification(uid: string, bowl: number, level: number) {
-  const title = "⚠️ Low Food Alert!";
-  const body = level > 0 ?
-    `Food container for Bowl ${bowl} is running low (at ${level}%)!` :
-    `Food container for Bowl ${bowl} is empty!`;
-  const data = { screen: "home" };
-  await sendGenericPushNotification(uid, title, body, data);
 }

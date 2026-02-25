@@ -1,10 +1,10 @@
 /*
  * =================================================================
- * PAWFEEDS HLS PUSH SERVER
+ * PAWFEEDS HLS PUSH SERVER (TIMING FIXED)
  * =================================================================
- * This server's only job is to connect to the local ESP32 cameras
- * and "push" their streams to a public RTMP server.
- * It is no longer an "on-demand" HLS server.
+ * Fixes:
+ * - "Sped Up" video: Uses Wallclock timestamps + Enforced Output FPS.
+ * - Stability: Retains reconnect logic to prevent "End of File" loops.
  * =================================================================
  */
 const ffmpeg = require('fluent-ffmpeg');
@@ -12,83 +12,97 @@ const ffmpegStatic = require('ffmpeg-static');
 
 // --- CONFIGURATION ---
 
-// (REQUIRED) SET YOUR PUBLIC SERVER'S IP OR DOMAIN
-// Make sure your public server is configured to accept RTMP on port 1935.
 const PUBLIC_SERVER_IP = '134.209.100.91';
-
-const RTMP_BASE_URL = `rtmp://${PUBLIC_SERVER_IP}:1935/live`; // 'live' is a common app name in nginx-rtmp
+const RTMP_BASE_URL = `rtmp://${PUBLIC_SERVER_IP}:1935/live`;
 
 const CAMERA_SOURCES = {
-  // Key: The "stream key" to push to. e.g., rtmp://.../live/stream1
-  // Value: The local IP of the camera.
-  'stream1': 'http://192.168.1.183/stream', // Bowl 1 Camera
+  'stream1': 'http://pawfeeds-cam-1.local/stream', 
+  'stream2': 'http://pawfeeds-cam-2.local/stream', 
 };
 
-// FFmpeg settings for a stable MJPEG -> RTMP push
-const FFMPEG_OPTIONS = [
-  '-fflags +discardcorrupt', // Skip bad frames
-  '-g 10',                   // Keyframe every 10 frames (1 per sec)
-  '-c:v libx264',            // Use libx264 codec
-  '-preset ultrafast',       // Prioritize low-CPU
-  '-tune zerolatency',       // Optimize for live streaming
-  '-profile:v baseline',     // <-- ADDED FOR MAX COMPATIBILITY
-  '-pix_fmt yuv420p',        // Standard pixel format for compatibility
-  '-an',                     // No audio
-  '-f flv'                   // Force format to FLV (standard for RTMP)
+// FFmpeg Output Options (Encoding & Timing)
+const FFMPEG_OUTPUT_OPTIONS = [
+  '-fflags +discardcorrupt', 
+  '-c:v libx264',            
+  '-preset ultrafast',       
+  '-tune zerolatency',       
+  '-g 20',                   // Keyframe every 2 seconds (at 10fps)
+  '-profile:v baseline',     
+  '-pix_fmt yuv420p',
+  '-r 10',                   // <--- CRITICAL: Force output to 10 FPS to prevent speed-up
+  '-an',                     
+  '-f flv'                   
+];
+
+// FFmpeg Input Options (Connection Handling & Time Generation)
+const FFMPEG_INPUT_OPTIONS = [
+  '-use_wallclock_as_timestamps 1', // <--- CRITICAL: Base timing on packet arrival, not camera metadata
+  '-reconnect 1',                   
+  '-reconnect_at_eof 1',            
+  '-reconnect_streamed 1',          
+  '-reconnect_delay_max 5',         
+  '-timeout 10000000'               
 ];
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
-console.log('[RelayPusher] PawFeeds Relay Pusher starting...');
+console.log('[RelayPusher] PawFeeds Relay Pusher starting (Real-Time Mode)...');
 
 /**
  * Creates and starts a persistent ffmpeg process for a camera.
- * If the process ends or errors, it will log and restart after a delay.
- * @param {string} streamKey - The RTMP stream key (e.g., "stream1")
- * @param {string} cameraUrl - The local URL of the MJPEG stream
  */
 function startStreamProcess(streamKey, cameraUrl) {
   const outputUrl = `${RTMP_BASE_URL}/${streamKey}`;
   console.log(`\n======================================================`);
-  console.log(`[DEBUG ${streamKey}] ATTEMPTING TO START STREAM PROCESS`);
+  console.log(`[DEBUG ${streamKey}] STARTING REAL-TIME STREAM`);
   console.log(`[DEBUG ${streamKey}] Source: ${cameraUrl}`);
-  console.log(`[DEBUG ${streamKey}] Destination: ${outputUrl}`);
   console.log(`======================================================\n`);
 
-  const ffmpegProcess = ffmpeg(cameraUrl, { timeout: 43200 })
-    // --- STABILITY FIXES for MJPEG Input ---
-    .inputFormat('mjpeg') // Tell ffmpeg the input is MJPEG
-    .inputFPS(10)         // Match camera's 10fps
-    .inputOption('-re')   // Read at native frame rate
-    // --- Output Options ---
-    .addOptions(FFMPEG_OPTIONS)
+  const ffmpegProcess = ffmpeg(cameraUrl)
+    .inputFormat('mjpeg') 
+    // .inputFPS(10)  <-- REMOVED: Caused conflicts with wallclock timing
+    
+    // Apply Robustness & Timing flags
+    .addInputOptions(FFMPEG_INPUT_OPTIONS)
+    
+    // Video Filter: Reset timestamps to 0 to prevent sync issues
+    .videoFilters('setpts=PTS-STARTPTS')
+
+    // Reduce analysis buffer to start stream faster (0.5s)
+    .addInputOption('-analyzeduration 500000') 
+    .addInputOption('-probesize 500000')       
+
+    .addOptions(FFMPEG_OUTPUT_OPTIONS)
     .output(outputUrl)
+    
     .on('start', (commandLine) => {
-      console.log(`[FFmpeg ${streamKey}] Spawned. Command: ${commandLine}`);
+      console.log(`[FFmpeg ${streamKey}] Active.`);
     })
     .on('error', (err, stdout, stderr) => {
-      console.error(`[FFmpeg ${streamKey}] FATAL ERROR: ${err.message}`);
-      console.error(`[FFmpeg ${streamKey}] STDERR:\n${stderr}`);
-      console.log(`[FFmpeg ${streamKey}] Restarting in 10 seconds...`);
-      setTimeout(() => startStreamProcess(streamKey, cameraUrl), 10000);
+      if (err.message.includes('SIGKILL')) return;
+
+      console.error(`[FFmpeg ${streamKey}] ERROR: ${err.message}`);
+      if (stderr) {
+          // Log only the last line of stderr to keep logs clean
+          const tail = stderr.split('\n').filter(line => line.trim()).slice(-1)[0]; 
+          console.error(`[FFmpeg ${streamKey}] DETAILS: ${tail}`);
+      }
+      
+      console.log(`[FFmpeg ${streamKey}] Reconnecting in 5 seconds...`);
+      setTimeout(() => startStreamProcess(streamKey, cameraUrl), 5000);
     })
-    .on('end', (stdout, stderr) => {
-      console.log(`[FFmpeg ${streamKey}] Stream finished (this shouldn't happen).`);
-      console.log(`[FFmpeg ${streamKey}] Restarting in 10 seconds...`);
-      setTimeout(() => startStreamProcess(streamKey, cameraUrl), 10000);
+    .on('end', () => {
+      console.log(`[FFmpeg ${streamKey}] Stream ended. Restarting...`);
+      setTimeout(() => startStreamProcess(streamKey, cameraUrl), 1000);
     });
 
-  // Run the process
   ffmpegProcess.run();
 }
 
 // --- MAIN ---
-// Start a persistent ffmpeg process for each camera defined in the config
 try {
   for (const [key, url] of Object.entries(CAMERA_SOURCES)) {
     startStreamProcess(key, url);
   }
 } catch (error) {
-  console.error('[RelayPusher] CRITICAL: Failed to initialize streams.', error);
-  // In a production environment, you might want to exit and let a process manager (like PM2) restart.
-  // process.exit(1);
+  console.error('[RelayPusher] INITIALIZATION ERROR:', error);
 }

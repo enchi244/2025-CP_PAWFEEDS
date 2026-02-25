@@ -1,11 +1,8 @@
 /*
  * Full file: enchi244/pawfeeds-app/pawfeeds-app-c6c6d3af53f9130a3abd84ae570f3bd8b45a9b11/hooks/usePushNotifications.ts
  *
- * FIXES:
- * 1. Updated setNotificationHandler to include shouldShowBanner and shouldShowList for NotificationBehavior type.
- * 2. Corrected removeNotificationSubscription to use listener.remove() method.
- * 3. Typed `data` in scheduleLocalNotification as Record<string, unknown>.
- * 4. Imported `Query` type from firebase/database and typed `rtdbQuery`.
+ * NEW: Added logic in responseListener to handle 'missed_meal_notification' action
+ * and call the 'skipScheduledMeal' Firebase Callable Function.
  */
 
 import * as Device from 'expo-device';
@@ -22,10 +19,11 @@ import {
   startAt,
 } from 'firebase/database';
 import { doc, setDoc } from 'firebase/firestore';
+import { getFunctions, httpsCallable } from 'firebase/functions'; // <-- NEW IMPORT
 import { useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
 import { useAuth } from '../context/AuthContext';
-import { db } from '../firebaseConfig'; // db is Firestore, we'll get the app from it
+import { db } from '../firebaseConfig';
 
 // Configure notification handling when app is in the foreground
 Notifications.setNotificationHandler({
@@ -33,10 +31,16 @@ Notifications.setNotificationHandler({
     shouldShowAlert: true,
     shouldPlaySound: true,
     shouldSetBadge: false,
-    shouldShowBanner: true, // FIX: Added for NotificationBehavior type
-    shouldShowList: true, // FIX: Added for NotificationBehavior type
+    shouldShowBanner: true, 
+    shouldShowList: true, 
   }),
 });
+
+// --- NEW HELPER FUNCTION TO CALL CLOUD FUNCTION ---
+// Define the callable function using the app instance from firebaseConfig
+const skipMeal = httpsCallable(getFunctions(db.app, 'asia-southeast1'), 'skipScheduledMeal');
+// --- END NEW HELPER FUNCTION ---
+
 
 /**
  * Triggers a local notification immediately.
@@ -44,7 +48,7 @@ Notifications.setNotificationHandler({
 async function scheduleLocalNotification(
   title: string,
   body: string,
-  data: Record<string, unknown>, // FIX: Changed type from object
+  data: Record<string, unknown>, 
 ) {
   try {
     await Notifications.scheduleNotificationAsync({
@@ -88,15 +92,12 @@ async function registerForPushNotificationsAsync(uid: string): Promise<string | 
     }
 
     try {
-      // This will fail on Huawei devices without GMS, which is OK
-      // for this workaround, as we'll rely on the RTDB listener.
       const { data: expoPushToken } = await Notifications.getExpoPushTokenAsync({
         projectId: '1b09b532-3580-4573-b26a-5431b090252b',
       });
       token = expoPushToken;
     } catch (e) {
       console.error('Error getting Expo push token (expected on HMS-only devices):', e);
-      // We don't return null here, because we still want the RTDB listener
     }
   } else {
     console.log('Must use physical device for Push Notifications');
@@ -104,7 +105,6 @@ async function registerForPushNotificationsAsync(uid: string): Promise<string | 
 
   if (token && uid) {
     try {
-      // Save the token to a 'users' collection, creating or merging the document.
       const userDocRef = doc(db, 'users', uid);
       await setDoc(userDocRef, { pushToken: token, updatedAt: new Date() }, { merge: true });
       console.log('Push token saved to Firestore for user:', uid);
@@ -123,31 +123,41 @@ export const usePushNotifications = () => {
 
   useEffect(() => {
     let rtdbListenerHandle: ((snapshot: DataSnapshot) => void) | null = null;
-    let rtdbQuery: Query | undefined; // FIX: Add Query type
+    let rtdbQuery: Query | undefined; 
 
     if (user) {
-      // User is authenticated, register for notifications
       registerForPushNotificationsAsync(user.uid);
 
       // --- 1. Set up Expo Push Notification Listeners ---
-      // Listener for when a notification is received while the app is foregrounded
       notificationListener.current = Notifications.addNotificationReceivedListener(notification => {
         // console.log('Expo Notification received:', notification);
       });
 
-      // Listener for when a user taps on a notification (app was backgrounded or killed)
-      responseListener.current = Notifications.addNotificationResponseReceivedListener(response => {
+      // Listener for when a user taps on a notification or an action button
+      responseListener.current = Notifications.addNotificationResponseReceivedListener(async response => {
+        const data = response.notification.request.content.data;
+        // Check for the "missed meal" notification action
+        if (data.action === 'missed_meal_notification' && data.scheduleId) {
+            const scheduleId = data.scheduleId as string;
+
+            try {
+                // Call the Cloud Function to disable the schedule and redistribute portions
+                console.log(`Calling skipScheduledMeal for schedule: ${scheduleId}`);
+                await skipMeal({ scheduleId });
+                alert('Meal skipped. Portions have been redistributed.');
+            } catch (error) {
+                console.error("Failed to skip meal via notification action:", error);
+                alert('Error skipping meal. Please check the schedule screen.');
+            }
+        }
         // console.log('Expo Notification response received:', response);
       });
 
       // --- 2. Set up RTDB Listener for Local Notifications ---
-      // This is the workaround for devices that don't get Expo push notifications.
       try {
-        const rtdb = getDatabase(db.app); // Get RTDB instance from the app
+        const rtdb = getDatabase(db.app); 
         const notificationsRef = ref(rtdb, `user_notifications/${user.uid}`);
 
-        // Query for new notifications starting from "now"
-        // This prevents triggering notifications for all old messages on app start
         rtdbQuery = query(notificationsRef, orderByChild('timestamp'), startAt(Date.now()));
 
         rtdbListenerHandle = onChildAdded(rtdbQuery, (snapshot) => {
@@ -169,18 +179,16 @@ export const usePushNotifications = () => {
 
       // --- 3. Cleanup listeners on unmount ---
       return () => {
-        // Cleanup Expo listeners
         if (notificationListener.current) {
-          notificationListener.current.remove(); // FIX: Use .remove()
+          notificationListener.current.remove(); 
         }
         if (responseListener.current) {
-          responseListener.current.remove(); // FIX: Use .remove()
+          responseListener.current.remove(); 
         }
-        // Cleanup RTDB listener
         if (rtdbQuery && rtdbListenerHandle) {
           off(rtdbQuery, 'child_added', rtdbListenerHandle);
         }
       };
     }
-  }, [user]); // Re-run effect if user changes
+  }, [user]); 
 };

@@ -1,8 +1,11 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
+import { signOut } from 'firebase/auth';
 import React from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useAuth } from '../../context/AuthContext';
+import { auth } from '../../firebaseConfig';
 
 const COLORS = {
   primary: '#8C6E63',
@@ -15,6 +18,24 @@ const COLORS = {
 
 export default function GetStartedScreen() {
   const router = useRouter();
+  const { authStatus } = useAuth();
+
+  const handleCancel = async () => {
+    // If the user already has a feeder, "Cancel" implies returning to the dashboard.
+    if (authStatus === 'authenticated_with_feeder') {
+      router.replace('/(tabs)');
+      return;
+    }
+
+    // If the user has NO feeder, "Cancel" implies exiting the flow.
+    // Since they cannot access the app without a device, we log them out.
+    try {
+      await signOut(auth);
+      router.replace('/');
+    } catch (error) {
+      console.error('Error signing out:', error);
+    }
+  };
 
   return (
     <SafeAreaView style={styles.container} edges={['bottom']}>
@@ -38,6 +59,18 @@ export default function GetStartedScreen() {
         >
           <Text style={styles.buttonText}>Get Started</Text>
         </TouchableOpacity>
+
+        {/* Show the Cancel button if the user is authenticated.
+          Behavior adapts based on whether they already have a device.
+        */}
+        {(authStatus === 'authenticated_with_feeder' || authStatus === 'authenticated_no_feeder') && (
+          <TouchableOpacity
+            style={styles.secondaryButton}
+            onPress={handleCancel}
+          >
+            <Text style={styles.secondaryButtonText}>Cancel</Text>
+          </TouchableOpacity>
+        )}
       </View>
     </SafeAreaView>
   );
@@ -98,5 +131,16 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: 'bold',
     color: COLORS.text,
+  },
+  secondaryButton: {
+    marginTop: 16,
+    paddingVertical: 12,
+    width: '100%',
+    alignItems: 'center',
+  },
+  secondaryButtonText: {
+    fontSize: 16,
+    color: '#666',
+    fontWeight: '600',
   },
 });

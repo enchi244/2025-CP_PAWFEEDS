@@ -1,3 +1,13 @@
+/**
+ * PawFeeds Camera Firmware - High FPS Optimization
+ * STATUS: Working / Tuned for Speed
+ * * OPTIMIZATIONS:
+ * 1. Resolution dropped to CIF (400x296) for speed.
+ * 2. JPEG Quality relaxed to 16 (smaller packets).
+ * 3. Triple buffering enabled (fb_count = 3).
+ * 4. Removed artificial delay(100) limiter.
+ */
+
 #include "esp_camera.h"
 #include "Arduino.h"
 #include "FS.h"
@@ -9,23 +19,24 @@
 #include "esp_http_server.h"
 #include <Firebase_ESP_Client.h>
 #include <time.h> 
-
-// --- DNS FIX: Include the low-level DNS libraries ---
+#include <ESPmDNS.h> 
 #include "lwip/dns.h"
 #include "lwip/ip_addr.h"
 
+// --- FIX: REMOVED TokenHelper.h to prevent redefinition error ---
+#include "addons/RTDBHelper.h"
+
 // ==========================================================
-// IMPORTANT: CONFIGURE THIS FOR EACH CAMERA BEFORE UPLOADING
+// CONFIGURATION
 // ==========================================================
-#define BOWL_NUMBER 2 // Use 1 for the first camera, 2 for the second
+#define BOWL_NUMBER 1 // 1 or 2
 // ==========================================================
 
-// --- FIREBASE CONFIGURATION (copy from master) ---
+// --- FIREBASE CONFIGURATION ---
 #define FIREBASE_PROJECT_ID "pawfeeds-v2"
 #define FIREBASE_DATABASE_URL "https://pawfeeds-v2-default-rtdb.asia-southeast1.firebasedatabase.app/"
 #define SERVICE_ACCOUNT_CLIENT_EMAIL "firebase-adminsdk-fbsvc@pawfeeds-v2.iam.gserviceaccount.com"
 
-// --- FIX: Re-formatted private key for C++ compiler compliance ---
 #define SERVICE_ACCOUNT_PRIVATE_KEY "-----BEGIN PRIVATE KEY-----\n" \
 "MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQC+Sqt8BKfCEgbp\n" \
 "/q4XmzzpsKwlsKJesbWN/Sp2PO7nVgPqwEz9YeCy/aI98IjyGY5hujaLLNgB0GYE\n" \
@@ -55,7 +66,7 @@
 "Kzz19+jbd085r+kyTM5X0UVzZA==\n" \
 "-----END PRIVATE KEY-----\n"
 
-// --- Camera Pin Definition for AI-THINKER MODEL ---
+// --- Camera Pin Definition ---
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM      0
@@ -68,7 +79,7 @@
 #define Y5_GPIO_NUM       21
 #define Y4_GPIO_NUM       19
 #define Y3_GPIO_NUM       18
-#define Y2_GPIO_NUM        5
+#define Y2_GPIO_NUM       5
 #define VSYNC_GPIO_NUM    25
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
@@ -76,13 +87,14 @@
 // --- Global Objects ---
 Preferences preferences;
 FirebaseData stream_fbdo;
+FirebaseData upload_fbdo; 
 FirebaseAuth auth;
 FirebaseConfig config;
 String feederId = "";
 bool streamActive = false;
 bool cameraTaskStarted = false;
+bool ipUploaded = false; 
 
-// --- State Machine ---
 enum DeviceState { PROVISIONING, CONNECTING_WIFI, AWAITING_FEEDER_ID, SYNCING_TIME, AUTHENTICATING_FIREBASE, OPERATIONAL, ERROR };
 DeviceState currentState = PROVISIONING;
 
@@ -98,7 +110,7 @@ DeviceState currentState = PROVISIONING;
   #error "BOWL_NUMBER must be 1 or 2"
 #endif
 
-// --- Function Prototypes ---
+// --- Prototypes ---
 void listenForCredentials();
 void connectToWiFi();
 void syncTime(); 
@@ -109,14 +121,16 @@ void streamCallback(FirebaseStream data);
 void streamTimeoutCallback(bool timeout);
 void tokenStatusCallback(TokenInfo info);
 void listenForFeederId();
+void uploadCurrentIP(); 
 esp_err_t stream_handler(httpd_req_t *req);
 void camera_server_task(void *pvParameters);
-
+void performFactoryReset();
+void checkSerialCommands();
 
 void setup() {
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); 
   Serial.begin(115200);
-  Serial.println("\n[PawFeeds CAM] Booting (Optimized Firmware)...");
+  Serial.println("\n[PawFeeds CAM] Booting (High FPS Mode)...");
   SerialSlave.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN);
 
   preferences.begin("pawfeeds-cam", true);
@@ -131,7 +145,31 @@ void setup() {
   }
 }
 
-// The main loop runs implicitly on Core 0, handling Firebase and general logic.
+void performFactoryReset() {
+  Serial.println("[SYSTEM] Factory Reset triggered...");
+  preferences.begin("pawfeeds-cam", false);
+  preferences.clear();
+  preferences.end();
+  delay(1000);
+  ESP.restart();
+}
+
+void checkSerialCommands() {
+  if (SerialSlave.available()) {
+    String packet = SerialSlave.readStringUntil('\n');
+    packet.trim();
+    if (packet.length() > 0) {
+      Serial.printf("[SERIAL] Received: %s\n", packet.c_str());
+      if (packet == "RESET_DEVICE") {
+        SerialSlave.println("OK");
+        delay(100);
+        performFactoryReset();
+      }
+    }
+  }
+}
+
+// --- MAIN LOOP ---
 void loop() {
   switch(currentState) {
     case PROVISIONING:
@@ -151,52 +189,50 @@ void loop() {
       break;
     case OPERATIONAL:
       if (!cameraTaskStarted) {
-        Serial.println("[SYSTEM] Firebase is ready. Starting camera task on Core 1.");
-        xTaskCreatePinnedToCore(
-          camera_server_task,
-          "CameraServer",
-          10000,
-          NULL,
-          2,
-          NULL,
-          1
-        );
+        Serial.println("[SYSTEM] Starting camera task on Core 1.");
+        xTaskCreatePinnedToCore(camera_server_task, "CameraServer", 10000, NULL, 2, NULL, 1);
         cameraTaskStarted = true;
       }
-
-      // ===================================================================
-      // === THIS IS THE FIX: Disable the RTDB stream ======================
-      // ===================================================================
-      // By commenting out this block, Core 0 is now free and will not
-      // compete with Core 1 for network resources, which was causing
-      // the "Send chunk failed" error.
-      /*
       if (!streamActive) {
-        startRTDBStream();
+          startRTDBStream();
       }
-      if (Firebase.ready() && !Firebase.RTDB.readStream(&stream_fbdo)) {
-        Serial.println("[ERROR] Stream read error!");
-        streamActive = false;
+      if (!ipUploaded && Firebase.ready() && feederId.length() > 0) {
+         uploadCurrentIP();
       }
-      */
-      // ===================================================================
-      // === END OF FIX ====================================================
-      // ===================================================================
+      checkSerialCommands();
       break;
     case ERROR:
-      Serial.println("[ERROR] Halting.");
-      delay(10000);
+      delay(5000);
+      ESP.restart();
       break;
   }
   delay(100);
 }
 
+void uploadCurrentIP() {
+    String ipAddress = WiFi.localIP().toString();
+    
+    // Using safe += concatenation
+    String nodePath = "/feeders/";
+    nodePath += feederId;
+    nodePath += "/camIp";
+    nodePath += (BOWL_NUMBER == 1 ? "1" : "2");
+    
+    Serial.printf("[IP SYNC] Uploading IP %s to %s\n", ipAddress.c_str(), nodePath.c_str());
+    
+    if (Firebase.RTDB.setString(&upload_fbdo, nodePath, ipAddress)) {
+        Serial.println("[IP SYNC] IP Address uploaded successfully.");
+        ipUploaded = true; 
+    } else {
+        Serial.printf("[IP SYNC] Failed to upload IP: %s\n", upload_fbdo.errorReason().c_str());
+        ipUploaded = false; 
+    }
+}
+
 void listenForCredentials() {
-  Serial.println("[PROVISIONING] No credentials found. Listening for Master...");
-  while (currentState == PROVISIONING) {
-    if (SerialSlave.available() > 0) {
+  if (SerialSlave.available() > 0) {
       String packet = SerialSlave.readStringUntil('\n');
-      if (packet.indexOf("FEEDER_ID") != -1) continue;
+      if (packet.indexOf("FEEDER_ID") != -1) return;
       
       int separator = packet.indexOf('|');
       if (separator > 0) {
@@ -204,46 +240,32 @@ void listenForCredentials() {
         String pass = packet.substring(separator + 1);
         pass.trim();
         
-        Serial.println("\n[PROVISIONING] Wi-Fi Credentials received! Saving...");
-        
+        Serial.println("[PROVISIONING] Credentials received. Saving...");
         preferences.begin("pawfeeds-cam", false);
         preferences.putString("ssid", ssid);
         preferences.putString("pass", pass);
         preferences.end();
-
         SerialSlave.println("OK");
-        Serial.println("[PROVISIONING] Saved. Rebooting to connect...");
         delay(1000);
         ESP.restart();
       }
-    }
-    delay(100);
   }
 }
 
 void listenForFeederId() {
-  Serial.println("[PROVISIONING] Awaiting Feeder ID from Master...");
-  while(currentState == AWAITING_FEEDER_ID) {
     if (SerialSlave.available() > 0) {
       String packet = SerialSlave.readStringUntil('\n');
       if (packet.startsWith("FEEDER_ID|")) {
         String receivedId = packet.substring(packet.indexOf('|') + 1);
         receivedId.trim();
-        Serial.printf("[PROVISIONING] Feeder ID received: %s. Saving...\n", receivedId.c_str());
-
         preferences.begin("pawfeeds-cam", false);
         preferences.putString("feederId", receivedId);
         preferences.end();
         feederId = receivedId;
-
         SerialSlave.println("OK");
-        Serial.println("[PROVISIONING] Feeder ID saved. Proceeding to Firebase Auth.");
-        
         currentState = SYNCING_TIME;
       }
     }
-    delay(100);
-  }
 }
 
 void connectToWiFi() {
@@ -252,71 +274,50 @@ void connectToWiFi() {
   String pass = preferences.getString("pass");
   preferences.end();
 
-  IPAddress primaryDNS(8, 8, 8, 8);
-  IPAddress secondaryDNS(8, 8, 4, 4);
-  IPAddress ip(0, 0, 0, 0);
-  IPAddress gateway(0, 0, 0, 0);
-  IPAddress subnet(0, 0, 0, 0);
-
-  if (!WiFi.config(ip, gateway, subnet, primaryDNS, secondaryDNS)) {
-    Serial.println("[ERROR] WiFi.config() failed. Halting.");
-    currentState = ERROR;
-    return;
-  }
-  
+  WiFi.mode(WIFI_STA);
   WiFi.begin(ssid.c_str(), pass.c_str());
-  Serial.print("[Wi-Fi] Connecting to ");
-  Serial.print(ssid);
-
+  
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
     delay(500);
     Serial.print(".");
     attempts++;
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("\n[Wi-Fi] Connected! IP Address: ");
+    Serial.print("\n[Wi-Fi] Connected! IP: ");
     Serial.println(WiFi.localIP());
+
+    String hostname = "pawfeeds-cam-";
+    hostname += BOWL_NUMBER;
     
+    if (MDNS.begin(hostname.c_str())) {
+        Serial.printf("[MDNS] Started: %s.local\n", hostname.c_str());
+        MDNS.addService("http", "tcp", 80);
+    }
+
     if (feederId.length() == 0) {
       currentState = AWAITING_FEEDER_ID;
     } else {
       currentState = SYNCING_TIME;
     }
   } else {
-    Serial.println("\n[Wi-Fi] Failed to connect. Clearing credentials and rebooting.");
-    preferences.begin("pawfeeds-cam", false);
-    preferences.clear();
-    preferences.end();
-    delay(1000);
+    Serial.println("\n[Wi-Fi] Failed. Rebooting.");
     ESP.restart();
   }
 }
 
 void syncTime() {
-    Serial.println("[TIME] Syncing with NTP server...");
+    Serial.println("[TIME] Syncing...");
     configTime(8 * 3600, 0, "pool.ntp.org", "time.nist.gov");
-    
     time_t now = time(nullptr);
     int attempts = 0;
-    while (now < 8 * 3600 * 2 && attempts < 60) {
+    while (now < 8 * 3600 * 2 && attempts < 20) {
         delay(500);
-        Serial.print(".");
         now = time(nullptr);
         attempts++;
     }
-
-    if (now < 8 * 3600 * 2) {
-        Serial.println("\n[TIME] Failed to sync time!");
-        currentState = ERROR;
-    } else {
-        struct tm timeinfo;
-        gmtime_r(&now, &timeinfo);
-        Serial.print("\n[TIME] Time synced successfully: ");
-        Serial.print(asctime(&timeinfo));
-        currentState = AUTHENTICATING_FIREBASE;
-    }
+    currentState = AUTHENTICATING_FIREBASE;
 }
 
 void authenticateWithFirebase() {
@@ -324,7 +325,7 @@ void authenticateWithFirebase() {
     currentState = OPERATIONAL;
     return;
   }
-  Serial.println("[AUTH] Configuring Firebase service account...");
+  Serial.println("[AUTH] Auth init...");
   config.database_url = FIREBASE_DATABASE_URL;
   config.service_account.data.client_email = SERVICE_ACCOUNT_CLIENT_EMAIL;
   config.service_account.data.project_id = FIREBASE_PROJECT_ID;
@@ -337,66 +338,48 @@ void authenticateWithFirebase() {
 
 void tokenStatusCallback(TokenInfo info) {
   if (info.status == token_status_ready) {
-    Serial.println("[AUTH] Token obtained successfully.");
+    Serial.println("[AUTH] Token ready.");
     currentState = OPERATIONAL;
-  } else {
-    Serial.printf("[AUTH] Token error: %s\n", info.error.message.c_str());
   }
 }
 
 void startRTDBStream() {
     if (feederId.length() == 0 || !Firebase.ready()) return;
+    
     String fullStreamPath = "/commands/";
-    fullStreamPath.concat(feederId);
-    Serial.print("[STREAM] Starting RTDB stream on path: ");
-    Serial.println(fullStreamPath);
-
-    if (!Firebase.RTDB.beginStream(&stream_fbdo, fullStreamPath.c_str())) {
-        Serial.printf("[STREAM] Could not begin stream: %s\n", stream_fbdo.errorReason().c_str());
-        return;
+    fullStreamPath += feederId;
+    
+    if (Firebase.RTDB.beginStream(&stream_fbdo, fullStreamPath.c_str())) {
+        Firebase.RTDB.setStreamCallback(&stream_fbdo, streamCallback, streamTimeoutCallback);
+        streamActive = true;
     }
-    Firebase.RTDB.setStreamCallback(&stream_fbdo, streamCallback, streamTimeoutCallback);
-    streamActive = true;
-    Serial.println("[STREAM] RTDB Stream started successfully.");
 }
 
 void streamCallback(FirebaseStream data) {
-    Serial.printf("[STREAM] Event: %s, Path: %s\n", data.eventType().c_str(), data.dataPath().c_str());
-    if (data.dataType() == "json" && data.dataPath() == "/") {
+    if (data.dataType() == "json") {
         FirebaseJson &json = data.to<FirebaseJson>();
         FirebaseJsonData result;
-        String command;
         if (json.get(result, "command")) {
-            command = result.to<String>();
-        }
-
-        if (command == "reset_device") {
-            Serial.println("[SYSTEM] Reset command received. Clearing ALL credentials and restarting.");
-            String fullStreamPath = "/commands/";
-            fullStreamPath.concat(feederId);
-            Firebase.RTDB.deleteNode(&stream_fbdo, fullStreamPath.c_str());
-
-            preferences.begin("pawfeeds-cam", false);
-            preferences.clear();
-            preferences.end();
-            delay(500);
-            ESP.restart();
+            if (result.to<String>() == "reset_device") {
+                String cmdPath = "/commands/";
+                cmdPath += feederId;
+                
+                Firebase.RTDB.deleteNode(&stream_fbdo, cmdPath);
+                performFactoryReset();
+            }
         }
     }
 }
 
 void streamTimeoutCallback(bool timeout) {
-  if (timeout) {
-    Serial.println("[STREAM] Stream timed out. It will be restarted automatically.");
-    streamActive = false;
-  }
+  if (timeout) streamActive = false;
 }
 
+// --- Camera Logic ---
 #define PART_BOUNDARY "12345678900000000000000000000000"
 static const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
 static const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
 static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
-static const char* _FIRST_BOUNDARY = "--" PART_BOUNDARY "\r\n";
 
 esp_err_t stream_handler(httpd_req_t *req){
   camera_fb_t * fb = NULL;
@@ -404,18 +387,13 @@ esp_err_t stream_handler(httpd_req_t *req){
   size_t _jpg_buf_len = 0;
   uint8_t * _jpg_buf = NULL;
   char * part_buf[64];
-  bool is_first_frame = true;
-  Serial.println("[STREAM HANDLER] Client connected.");
+
   res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
-  if (res != ESP_OK) { return res;
-  }
-  
-  httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
+  if (res != ESP_OK) return res;
 
   while (true) {
     fb = esp_camera_fb_get();
     if (!fb) {
-      Serial.println("[STREAM HANDLER] ERROR: Camera frame capture failed.");
       res = ESP_FAIL;
       break;
     }
@@ -423,36 +401,20 @@ esp_err_t stream_handler(httpd_req_t *req){
     _jpg_buf_len = fb->len;
     _jpg_buf = fb->buf;
     
-    if(is_first_frame){
-      res = httpd_resp_send_chunk(req, _FIRST_BOUNDARY, strlen(_FIRST_BOUNDARY));
-      is_first_frame = false;
-    } else {
-      res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
-    }
-    
+    if (res == ESP_OK) res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
     if (res == ESP_OK) {
       size_t hlen = snprintf((char *)part_buf, 64, _STREAM_PART, _jpg_buf_len);
       res = httpd_resp_send_chunk(req, (const char *)part_buf, hlen);
     }
-
-    if (res == ESP_OK) {
-      res = httpd_resp_send_chunk(req, (const char *)_jpg_buf, _jpg_buf_len);
-    }
+    if (res == ESP_OK) res = httpd_resp_send_chunk(req, (const char *)_jpg_buf, _jpg_buf_len);
     
     esp_camera_fb_return(fb);
+    if (res != ESP_OK) break;
     
-    if (res != ESP_OK) {
-      Serial.printf("[STREAM HANDLER] ERROR: Send chunk failed. Breaking loop.\n");
-      break;
-    }
-    
-    // ==========================================================
-    // === STABILITY FIX: Change to 100ms for solid 10fps
-    // ==========================================================
-    delay(100); 
+    // === FPS FIX: Reduced from 100ms to 1ms ===
+    // This removes the artificial 10fps cap.
+    delay(1); 
   }
-
-  Serial.println("[STREAM HANDLER] Client disconnected.");
   return res;
 }
 
@@ -477,40 +439,39 @@ void startCameraServer(){
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
+  
   config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size = FRAMESIZE_VGA;
-  config.jpeg_quality = 12;
-  config.fb_count = 2; 
-
+  
+  // === OPTIMIZATION SETTINGS ===
+  // 1. Resolution: CIF (400x296) - Faster than VGA, better than QVGA
+  config.frame_size = FRAMESIZE_CIF;
+  
+  // 2. Quality: 16 - slightly lower quality for smaller packet sizes
+  config.jpeg_quality = 16;
+  
+  // 3. Buffers: 3 - Enables "Triple Buffering" for smoother flow
+  config.fb_count = 3; 
   config.fb_location = CAMERA_FB_IN_PSRAM;
 
-  esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) {
-    Serial.printf("Camera init failed with error 0x%x", err);
-    return;
-  }
+  esp_camera_init(&config);
 
   httpd_handle_t stream_httpd = NULL;
   httpd_config_t server_config = HTTPD_DEFAULT_CONFIG();
-  server_config.stack_size = 8192;
+  server_config.stack_size = 8192; 
+  
   httpd_uri_t stream_uri = {
       .uri       = "/stream",
       .method    = HTTP_GET,
       .handler   = stream_handler,
       .user_ctx  = NULL
   };
+
   if (httpd_start(&stream_httpd, &server_config) == ESP_OK) {
       httpd_register_uri_handler(stream_httpd, &stream_uri);
-      Serial.print("[STREAM] Camera stream server started on Core 1 at http://");
-      Serial.print(WiFi.localIP());
-      Serial.println("/stream");
   }
 }
 
-// +++ This entire task runs on Core 1 +++
 void camera_server_task(void *pvParameters) {
-  Serial.println("[SYSTEM] Camera task started.");
   startCameraServer();
-  // This task should not return. If it does, delete it.
   vTaskDelete(NULL);
 }

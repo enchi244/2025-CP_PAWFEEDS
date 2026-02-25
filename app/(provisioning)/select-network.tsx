@@ -59,14 +59,17 @@ export default function SelectNetworkScreen() {
       const data: WifiNetwork[] = await response.json();
       if (!Array.isArray(data)) throw new Error('Received invalid data format from device.');
 
-      setNetworks(data.sort((a, b) => b.rssi - a.rssi));
+      // Filter out duplicates or empty SSIDs if necessary
+      const uniqueNetworks = data.filter((v, i, a) => a.findIndex(t => (t.ssid === v.ssid)) === i && v.ssid.length > 0);
+
+      setNetworks(uniqueNetworks.sort((a, b) => b.rssi - a.rssi));
     } catch (e: any) {
       clearTimeout(timeoutId);
       console.error("Fetch Error:", e);
       if (e.name === 'AbortError') {
         setError('Request timed out. Ensure you are connected to "PawFeeds_Setup" Wi-Fi and try again.');
       } else {
-        setError('Failed to fetch networks. Please try again.');
+        setError('Failed to fetch networks. Please try again or use Manual Entry.');
       }
       setNetworks([]);
     } finally {
@@ -104,27 +107,47 @@ export default function SelectNetworkScreen() {
     setIsConnecting(true);
 
     try {
-      const response = await fetch('http://192.168.4.1/save', {
+      // 1. Construct payload
+      const payload = `ssid=${encodeURIComponent(ssid)}&pass=${encodeURIComponent(password)}&uid=${encodeURIComponent(user.uid)}`;
+
+      // 2. Create a fetch promise
+      const request = fetch('http://192.168.4.1/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `ssid=${encodeURIComponent(ssid)}&pass=${encodeURIComponent(password)}&uid=${encodeURIComponent(user.uid)}`,
+        body: payload,
       });
 
-      if (!response.ok) {
-        throw new Error(`Device responded with status: ${response.status}`);
-      }
-      
-      setIsModalVisible(false);
-      setPassword('');
-      setManualSsid('');
-      router.replace('/(provisioning)/complete');
+      // 3. Create a timeout promise (5 seconds)
+      // If the device reboots instantly, the fetch might hang or fail.
+      const timeout = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Timeout')), 5000)
+      );
+
+      // 4. Race them
+      await Promise.race([request, timeout]);
+
+      // If we get here without error, assume success
+      navigateToComplete();
 
     } catch (error) {
-      console.error('Pairing failed:', error);
-      Alert.alert('Pairing Failed', 'Could not send credentials to the feeder. Please try again.');
+      console.log('Pairing request finished with error/interruption:', error);
+      
+      // CRITICAL FIX: 
+      // The ESP32 reboots ~1.5s after receiving data, often breaking the HTTP response connection.
+      // A "Network request failed" here usually means SUCCESS (device rebooted to connect to WiFi).
+      // We proceed to the complete screen to let the Cloud Function verify the connection.
+      navigateToComplete();
     } finally {
       setIsConnecting(false);
     }
+  };
+
+  const navigateToComplete = () => {
+    setIsModalVisible(false);
+    setPassword('');
+    setManualSsid('');
+    // Use replace to prevent going back to the selection screen during setup
+    router.replace('/(provisioning)/complete');
   };
 
   const getSignalIcon = (rssi: number): React.ComponentProps<typeof MaterialCommunityIcons>['name'] => {
@@ -138,7 +161,7 @@ export default function SelectNetworkScreen() {
     setIsModalVisible(false);
     setPassword('');
     setManualSsid('');
-    setIsPasswordVisible(false); // Reset password visibility on close
+    setIsPasswordVisible(false);
   };
 
   return (
@@ -219,15 +242,20 @@ export default function SelectNetworkScreen() {
         </View>
       ) : error ? (
         <View style={styles.loaderContainer}>
+            <MaterialCommunityIcons name="wifi-off" size={48} color={COLORS.lightGray} />
             <Text style={styles.errorText}>{error}</Text>
             <TouchableOpacity style={styles.retryButton} onPress={fetchNetworks}>
                 <Text style={styles.retryButtonText}>Scan Again</Text>
+            </TouchableOpacity>
+            
+            <TouchableOpacity style={[styles.footerButton, {marginTop: 30}]} onPress={handleManualEntry}>
+               <Text style={styles.footerButtonText}>Or Enter Manually</Text>
             </TouchableOpacity>
         </View>
       ) : (
         <FlatList
           data={networks}
-          keyExtractor={(item) => item.ssid}
+          keyExtractor={(item, index) => item.ssid + index}
           renderItem={({ item }) => (
             <TouchableOpacity style={styles.networkItem} onPress={() => handleNetworkSelect(item)}>
               <MaterialCommunityIcons name={getSignalIcon(item.rssi)} size={24} color={COLORS.primary} />
@@ -260,7 +288,7 @@ const styles = StyleSheet.create({
   subtitle: { fontSize: 16, color: '#666', marginTop: 8 },
   loaderContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
   loaderText: { marginTop: 16, color: '#666', fontSize: 16 },
-  errorText: { fontSize: 16, color: 'red', textAlign: 'center', marginBottom: 20 },
+  errorText: { fontSize: 16, color: 'red', textAlign: 'center', marginBottom: 20, marginTop: 10 },
   retryButton: { backgroundColor: COLORS.primary, paddingVertical: 12, paddingHorizontal: 30, borderRadius: 8 },
   retryButtonText: { color: COLORS.white, fontSize: 16, fontWeight: 'bold' },
   listContent: { paddingHorizontal: 24, paddingBottom: 24 },
@@ -271,6 +299,7 @@ const styles = StyleSheet.create({
     padding: 20,
     borderRadius: 12,
     marginBottom: 12,
+    shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 5, elevation: 2
   },
   networkSsid: { flex: 1, marginLeft: 16, fontSize: 16, fontWeight: '600', color: COLORS.text },
   footerButtons: {
@@ -302,6 +331,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.white,
     borderRadius: 16,
     padding: 24,
+    shadowColor: '#000', shadowOpacity: 0.1, shadowRadius: 10, elevation: 5
   },
   modalTitle: {
     fontSize: 18,
@@ -335,6 +365,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 14,
     fontSize: 16,
+    color: COLORS.text,
   },
   eyeIcon: {
     padding: 12,
@@ -343,6 +374,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     marginTop: 8,
+    gap: 12
   },
   modalButton: {
     flex: 1,
@@ -352,11 +384,9 @@ const styles = StyleSheet.create({
   },
   cancelButton: {
     backgroundColor: COLORS.lightGray,
-    marginRight: 8,
   },
   connectButton: {
     backgroundColor: COLORS.accent,
-    marginLeft: 8,
   },
   modalButtonText: {
     fontSize: 16,

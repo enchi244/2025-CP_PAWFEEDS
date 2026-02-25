@@ -3,7 +3,8 @@ import { FirebaseApp, getApp, getApps, initializeApp } from "firebase/app";
 import { Auth, getAuth, getReactNativePersistence, initializeAuth } from "firebase/auth";
 import { getDatabase } from "firebase/database";
 import { getFirestore } from "firebase/firestore";
-import { getStorage } from "firebase/storage"; // 1. IMPORT getStorage
+import { getFunctions } from "firebase/functions";
+import { getStorage } from "firebase/storage";
 
 // Your app's Firebase project configuration
 const firebaseConfig = {
@@ -16,21 +17,17 @@ const firebaseConfig = {
   databaseURL: "https://pawfeeds-v2-default-rtdb.asia-southeast1.firebasedatabase.app"
 };
 
-
-// ** FIX: The definitive solution for initialization **
 // Declare variables to hold the app and auth instances.
 let app: FirebaseApp;
 let auth: Auth;
 
-// Check if a Firebase app has already been initialized.
+// Singleton pattern: Check if app is already initialized
 if (!getApps().length) {
-  // If not, initialize the app and auth with persistence for the first time.
   app = initializeApp(firebaseConfig);
   auth = initializeAuth(app, {
     persistence: getReactNativePersistence(ReactNativeAsyncStorage)
   });
 } else {
-  // If an app already exists (due to hot reloading), get the existing instances.
   app = getApp();
   auth = getAuth(app);
 }
@@ -38,7 +35,15 @@ if (!getApps().length) {
 // Initialize other Firebase services
 const db = getFirestore(app);
 const database = getDatabase(app);
-const storage = getStorage(app); // 2. INITIALIZE storage
+const storage = getStorage(app);
+const functions = getFunctions(app, 'asia-southeast1');
 
-// Export all the configured services
-export { auth, database, db, storage }; // 3. EXPORT storage
+// === COMPATIBILITY ADAPTER ===
+// This function ensures 'complete.tsx' and 'AuthContext.tsx' continue to work
+// by returning the instances we initialized above.
+const initializeFirebase = () => {
+  return { app, auth, db, database, functions, storage };
+};
+
+// Export individual instances (your preferred style) AND the helper function
+export { app, auth, database, db, functions, initializeFirebase, storage };

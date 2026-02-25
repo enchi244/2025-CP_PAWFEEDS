@@ -1,9 +1,10 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { Audio } from 'expo-av'; // We still need this for setAudioModeAsync
+import { GoogleSignin } from '@react-native-google-signin/google-signin';
+import { Audio } from 'expo-av';
 import { useRouter } from 'expo-router';
 import { signOut } from 'firebase/auth';
-import { getDatabase, ref, serverTimestamp as rtdbServerTimestamp, set } from 'firebase/database';
-import { collection, deleteDoc, doc, getDocs, onSnapshot, query, Unsubscribe, where } from 'firebase/firestore';
+import { getDatabase, onValue, ref, serverTimestamp as rtdbServerTimestamp, set } from 'firebase/database';
+import { addDoc, collection, deleteDoc, doc, serverTimestamp as firestoreServerTimestamp, getDocs, onSnapshot, query, Unsubscribe, where } from 'firebase/firestore';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -18,12 +19,9 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  View,
+  View
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-// ==========================================================
-// === THIS IS THE CHANGE: Import the new VLC player        ===
-// ==========================================================
 import { VLCPlayer } from 'react-native-vlc-media-player';
 import { useAuth } from '../../context/AuthContext';
 import { auth, db } from '../../firebaseConfig';
@@ -36,47 +34,71 @@ const COLORS = {
   lightGray: '#E0E0E0',
   white: '#FFFFFF',
   danger: '#D32F2F',
+  success: '#4CAF50',
+  warning: '#FF9800',
   overlay: 'rgba(0, 0, 0, 0.5)',
+  offline: '#9E9E9E',
 };
 
 const { width } = Dimensions.get('window');
 const CARD_WIDTH = width - 40;
 
-// --- Interfaces for our data models ---
 interface Pet {
-    id: string;
-    name: string;
-    recommendedPortion: number;
+  id: string;
+  name: string;
+  recommendedPortion: number;
+  snackPortion?: number; 
+  bowlNumber?: number;
 }
 
 interface Schedule {
-    id: string;
-    petId: string;
-    petName: string;
-    time: string;
-    bowlNumber: number;
-    isEnabled: boolean;
+  id: string;
+  petId: string;
+  petName: string;
+  time: string;
+  bowlNumber: number;
+  isEnabled: boolean;
+}
+
+interface Feeder {
+  id: string;
+  [key: string]: any;
+}
+
+interface BowlStatus {
+  isWaiting: boolean;
+  amount?: number;
+  petId?: string;
 }
 
 interface BowlCardProps {
   bowlNumber: number;
   selectedPet: Pet | undefined;
-  foodLevel: number;
+  // foodLevel prop removed from usage but kept in signature if passed from parent, 
+  // or we can just ignore it since we aren't displaying it.
+  foodLevel: number; 
   perMealPortion: number;
   onPressFeed: () => void;
-  onPressFilter: () => void;
   streamUri: string | null;
   isActive: boolean;
+  isFeederOnline: boolean;
+  bowlStatus: BowlStatus | undefined;
 }
 
-const BowlCard: React.FC<BowlCardProps> = ({ bowlNumber, selectedPet, foodLevel, perMealPortion, onPressFeed, onPressFilter, streamUri, isActive }) => {
+// [MODIFIED] BowlCard Component - Removed Food Level/Leftover Display
+const BowlCard: React.FC<BowlCardProps> = ({ 
+    bowlNumber, 
+    selectedPet, 
+    perMealPortion, 
+    onPressFeed, 
+    streamUri, 
+    isActive,
+    isFeederOnline,
+    bowlStatus
+}) => {
     const isUnassigned = !selectedPet;
-    
-    // We can remove the old VideoRef and showBuffering state
-    // const videoRef = useRef<VideoRef>(null);
-    // const [showBuffering, setShowBuffering] = useState(true);
+    const isFeedDisabled = isUnassigned || !isFeederOnline;
 
-    // This useEffect can stay, to ensure audio is correctly configured
     useEffect(() => {
         const setAudio = async () => {
             await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
@@ -85,38 +107,34 @@ const BowlCard: React.FC<BowlCardProps> = ({ bowlNumber, selectedPet, foodLevel,
     }, []);
 
     const handleError = (error: any) => {
-        // Only log errors for the active card
         if (isActive) {
-          console.error(`[VLC Player Bowl ${bowlNumber}] Playback Error:`, error);
+          console.log(`[Stream Error Bowl ${bowlNumber}]`, error);
         }
     };
 
     return (
       <View style={[styles.card, { width: CARD_WIDTH }]}>
         <View style={styles.cardHeader}>
-          <TouchableOpacity onPress={onPressFilter} style={styles.cardTitleContainer}>
-              <Text style={[styles.cardTitle, isUnassigned && { color: '#999' }]}>{`Bowl ${bowlNumber} - ${selectedPet?.name || 'No Pet Scheduled'}`}</Text>
-              <MaterialCommunityIcons name="chevron-down" size={24} color={COLORS.text} />
-          </TouchableOpacity>
-          <View style={styles.onlineIndicator} />
+          <View style={styles.cardTitleContainer}>
+              <Text style={[styles.cardTitle, isUnassigned && { color: '#999' }]}>
+                {`Bowl ${bowlNumber} - ${selectedPet?.name || 'No Pet Assigned'}`}
+              </Text>
+          </View>
+          <View style={[styles.onlineIndicator, { backgroundColor: isFeederOnline ? '#4CAF50' : COLORS.offline }]} />
         </View>
+
         <View style={styles.videoFeedPlaceholder}>
           {streamUri ? (
             <>
-              {/* ================================================================ */}
-              {/* === THIS IS THE FIX: Only render the <VlCPlayer> component   === */}
-              {/* === if the card is active.                                   === */}
-              {/* ================================================================ */}
               {isActive && (
                 <VLCPlayer
                   style={styles.video}
                   source={{ uri: streamUri }}
                   resizeMode="cover"
                   muted={true}
-                  paused={false} // It's only rendered if active, so it should never be paused
+                  paused={false}
                   onError={handleError}
-                  videoAspectRatio={`${16}:${9}`} // You might need to adjust this
-                  // The VLC player has its own internal loading spinner
+                  videoAspectRatio={`${16}:${9}`}
                 />
               )}
             </>
@@ -127,18 +145,25 @@ const BowlCard: React.FC<BowlCardProps> = ({ bowlNumber, selectedPet, foodLevel,
             </View>
           )}
         </View>
-        <View style={styles.statusContainer}>
-          <Text style={styles.statusLabel}>Food Level</Text>
-          <View style={styles.progressBarBackground}>
-            <View style={[styles.progressBarFill, { width: `${foodLevel}%` }]} />
-          </View>
-          <Text style={styles.statusPercentage}>{foodLevel}%</Text>
-        </View>
-        <TouchableOpacity style={[styles.feedButton, isUnassigned && styles.disabledButton]} onPress={onPressFeed} disabled={isUnassigned}>
-          <Text style={styles.feedButtonText}>Feed Now</Text>
+
+        {/* Status Container Removed Here */}
+
+        <TouchableOpacity 
+          style={[styles.feedButton, isFeedDisabled && styles.disabledButton]} 
+          onPress={onPressFeed} 
+          disabled={isFeedDisabled}
+        >
+          <Text style={styles.feedButtonText}>
+            {isFeederOnline 
+                ? (bowlStatus?.isWaiting 
+                    ? `Feed Pending Meal (${bowlStatus.amount}g)` 
+                    : (isUnassigned ? 'No Pet Assigned' : 'Feed Now')) 
+                : 'Feeder Offline'}
+          </Text>
         </TouchableOpacity>
+
         <Text style={styles.portionText}>
-          {`Next meal portion: ${perMealPortion > 0 ? perMealPortion : '--'}g`}
+          {`Next scheduled meal: ${perMealPortion > 0 ? perMealPortion : '--'}g`}
         </Text>
       </View>
     );
@@ -159,35 +184,38 @@ const formatScheduleTime = (timeString: string): string => {
 
 export default function DashboardScreen() {
   const router = useRouter();
-  const { user } = useAuth();
+  const { user, refreshUserData } = useAuth();
   const [activeIndex, setActiveIndex] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
-
+  
+  const [allFeeders, setAllFeeders] = useState<Feeder[]>([]);
+  const [feederId, setFeederId] = useState<string | null>(null);
+  
+  const [isFeederOnline, setIsFeederOnline] = useState(false);
   const [isMenuVisible, setIsMenuVisible] = useState(false);
   const [filters, setFilters] = useState({ bowl1: true, bowl2: true });
 
   const [pets, setPets] = useState<Pet[]>([]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
 
+  const [bowlStatuses, setBowlStatuses] = useState<{ [bowlId: string]: BowlStatus }>({});
+
   const [isFeedModalVisible, setIsFeedModalVisible] = useState(false);
-  const [isFilterModalVisible, setIsFilterModalVisible] = useState(false);
   const [selectedBowlForAction, setSelectedBowlForAction] = useState<number | null>(null);
   const [customAmount, setCustomAmount] = useState('');
-
   const [isCustomFeedVisible, setIsCustomFeedVisible] = useState(false);
-  const [selectedPetInBowl, setSelectedPetInBowl] = useState<{[bowlId: string]: string | undefined}>({});
+  const [isResetSelectionVisible, setIsResetSelectionVisible] = useState(false);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
 
-  const [feederId, setFeederId] = useState<string | null>(null);
-  
   const PUBLIC_HLS_SERVER_DOMAIN = 'workspherecbd.site';
   
-  // We use the NON-NESTED URL, as this was the last state we tested
-  // VLC player can handle either, but this is simpler.
+  // --- DYNAMIC IP STATE ---
   const [streamUris, setStreamUris] = useState<{ [bowlId: string]: string | null }>({
-    '1': `https://${PUBLIC_HLS_SERVER_DOMAIN}/hls/stream1.m3u8`,
-    '2': `https://${PUBLIC_HLS_SERVER_DOMAIN}/hls/stream2.m3u8`,
+    '1': null,
+    '2': null,
   });
 
+  // Keep tracking food levels for logic, even if not displayed
   const [foodLevels, setFoodLevels] = useState<{ [bowlId: string]: number }>({});
   const bowlsConfig = [{ id: 1 }, { id: 2 }];
 
@@ -197,88 +225,130 @@ export default function DashboardScreen() {
       return;
     }
 
-    const unsubscribes: Unsubscribe[] = [];
+    const fetchFeeders = async () => {
+      try {
+        const feedersRef = collection(db, 'feeders');
+        const q = query(feedersRef, where('owner_uid', '==', user.uid));
+        const querySnapshot = await getDocs(q);
+        
+        const fetchedFeeders = querySnapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        
+        setAllFeeders(fetchedFeeders);
 
-    const fetchFeederAndData = async () => {
-      const feedersRef = collection(db, 'feeders');
-      const q = query(feedersRef, where('owner_uid', '==', user.uid));
-      const querySnapshot = await getDocs(q);
-
-      if (!querySnapshot.empty) {
-        const currentFeederId = querySnapshot.docs[0].id;
-        setFeederId(currentFeederId);
-
-        // --- Real-time listener for feeder document ---
-        const feederDocRef = doc(db, 'feeders', currentFeederId);
-        const feederUnsub = onSnapshot(feederDocRef, (doc) => {
-            if (doc.exists()) {
-                const data = doc.data();
-                setFoodLevels(data.foodLevels || { "1": 0, "2": 0 });
-            }
-        });
-        unsubscribes.push(feederUnsub);
-
-        const petsRef = collection(db, 'feeders', currentFeederId, 'pets');
-        const petsUnsub = onSnapshot(petsRef, (snapshot) => {
-          setPets(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Pet)));
-        });
-        unsubscribes.push(petsUnsub);
-
-        const schedulesRef = collection(db, 'feeders', currentFeederId, 'schedules');
-        const schedulesUnsub = onSnapshot(schedulesRef, (snapshot) => {
-          setSchedules(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Schedule)));
-          setIsLoading(false);
-        });
-        unsubscribes.push(schedulesUnsub);
-      } else {
+        if (fetchedFeeders.length > 0) {
+          if (!feederId || !fetchedFeeders.find(f => f.id === feederId)) {
+            setFeederId(fetchedFeeders[0].id);
+          }
+        } else {
+          setFeederId(null);
+          setIsLoading(false); 
+        }
+      } catch (error) {
+        console.error("Error fetching feeders:", error);
         setIsLoading(false);
       }
     };
 
-    fetchFeederAndData().catch(console.error);
+    fetchFeeders();
+  }, [user, refreshTrigger]);
 
-    return () => unsubscribes.forEach(unsub => unsub());
-  }, [user]);
+  useEffect(() => {
+    if (!feederId || !user) {
+      return;
+    }
+
+    setIsLoading(true);
+    const unsubscribes: Unsubscribe[] = [];
+    const rtdbUnsubscribes: (() => void)[] = [];
+    const rtdb = getDatabase();
+
+    // 1. Listen for Firestore Data
+    const feederDocRef = doc(db, 'feeders', feederId);
+    const feederUnsub = onSnapshot(feederDocRef, (doc) => {
+        if (doc.exists()) {
+            const data = doc.data();
+            setFoodLevels(data.foodLevels || { "1": 0, "2": 0 });
+        } else {
+            setIsFeederOnline(false);
+        }
+    }, (error) => {
+        console.error("Feeder doc snapshot error:", error);
+    });
+    unsubscribes.push(feederUnsub);
+
+    // 2. Listen for RTDB Status
+    const statusRef = ref(rtdb, `feeders/${feederId}/status`);
+    const statusUnsub = onValue(statusRef, (snapshot) => {
+        const status = snapshot.val();
+        setIsFeederOnline(status === 'online');
+    });
+    rtdbUnsubscribes.push(() => statusUnsub()); 
+
+    // 3. Listen for Bowl Status
+    const bowlStatusRef = ref(rtdb, `feeders/${feederId}/bowlStatus`);
+    const bowlStatusUnsub = onValue(bowlStatusRef, (snapshot) => {
+        if (snapshot.exists()) {
+            setBowlStatuses(snapshot.val());
+        } else {
+            setBowlStatuses({});
+        }
+    });
+    rtdbUnsubscribes.push(() => bowlStatusUnsub());
+
+    // --- 4. NEW: DYNAMIC CAM IP LISTENER ---
+    const camIpRef1 = ref(rtdb, `feeders/${feederId}/camIp1`);
+    const camIpUnsub1 = onValue(camIpRef1, (snapshot) => {
+        const ip = snapshot.val();
+        setStreamUris(prev => ({
+            ...prev,
+            '1': ip ? `http://${ip}/stream` : `https://${PUBLIC_HLS_SERVER_DOMAIN}/hls/stream1.m3u8`
+        }));
+    });
+    rtdbUnsubscribes.push(() => camIpUnsub1());
+
+    const camIpRef2 = ref(rtdb, `feeders/${feederId}/camIp2`);
+    const camIpUnsub2 = onValue(camIpRef2, (snapshot) => {
+        const ip = snapshot.val();
+        const mDNSFallback = `http://pawfeeds-cam-2.local/stream`; 
+        setStreamUris(prev => ({
+            ...prev,
+            '2': ip ? `http://${ip}/stream` : mDNSFallback
+        }));
+    });
+    rtdbUnsubscribes.push(() => camIpUnsub2());
+    // ----------------------------------------
+
+    const petsRef = collection(db, 'feeders', feederId, 'pets');
+    const petsUnsub = onSnapshot(petsRef, (snapshot) => {
+      setPets(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Pet)));
+    });
+    unsubscribes.push(petsUnsub);
+
+    const schedulesRef = collection(db, 'feeders', feederId, 'schedules');
+    const schedulesUnsub = onSnapshot(schedulesRef, (snapshot) => {
+      setSchedules(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Schedule)));
+      setIsLoading(false);
+    });
+    unsubscribes.push(schedulesUnsub);
+
+    return () => {
+        unsubscribes.forEach(unsub => unsub());
+        rtdbUnsubscribes.forEach(unsub => unsub());
+    };
+  }, [feederId, user]);
   
-  const petsByBowl = useMemo(() => {
-    const bowlMap: { [bowlId: string]: Pet[] } = {};
-    const addedPetIds: { [bowlId: string]: Set<string> } = {};
-
-    schedules.forEach(schedule => {
-      if (schedule.isEnabled && schedule.petId && schedule.bowlNumber) {
-        if (!bowlMap[schedule.bowlNumber]) {
-          bowlMap[schedule.bowlNumber] = [];
-          addedPetIds[schedule.bowlNumber] = new Set();
-        }
-
-        const pet = pets.find(p => p.id === schedule.petId);
-        if (pet && !addedPetIds[schedule.bowlNumber].has(pet.id)) {
-          bowlMap[schedule.bowlNumber].push(pet);
-          addedPetIds[schedule.bowlNumber].add(pet.id);
-        }
+  const assignedPetsByBowl = useMemo(() => {
+    const bowlMap: { [bowlId: string]: Pet | undefined } = {};
+    pets.forEach(pet => {
+      if (pet.bowlNumber) {
+        bowlMap[pet.bowlNumber] = pet;
       }
     });
     return bowlMap;
-  }, [schedules, pets]);
-
-  useEffect(() => {
-    const newSelections = { ...selectedPetInBowl };
-    let changed = false;
-    bowlsConfig.forEach(bowl => {
-        const petsForBowl = petsByBowl[bowl.id];
-        if (petsForBowl && petsForBowl.length > 0 && !newSelections[bowl.id]) {
-            newSelections[bowl.id] = petsForBowl[0].id;
-            changed = true;
-        }
-        else if ((!petsForBowl || petsForBowl.length === 0) && newSelections[bowl.id]) {
-            delete newSelections[bowl.id];
-            changed = true;
-        }
-    });
-    if (changed) {
-        setSelectedPetInBowl(newSelections);
-    }
-  }, [petsByBowl, bowlsConfig]);
+  }, [pets]);
 
   const activeSchedulesByPetId = useMemo(() => {
     const counts: { [petId: string]: number } = {};
@@ -302,62 +372,91 @@ export default function DashboardScreen() {
     handleMenuClose();
     Alert.alert("Logout", "Are you sure you want to log out?", [
       { text: "Cancel", style: "cancel" },
-      { text: "Logout", style: "destructive", onPress: async () => {
-        try {
+      { 
+        text: "Logout", 
+        style: "destructive", 
+        onPress: async () => {
+          try {
+            try {
+              await GoogleSignin.signOut();
+            } catch (googleError) {
+              console.log("Google Sign-Out skipped or failed:", googleError);
+            }
             await signOut(auth);
-            router.replace('/login');
-        } catch (error) {
+          } catch (error) {
             console.error("Logout Error:", error);
             Alert.alert("Logout Failed", "An error occurred while logging out.");
+          }
         }
-      }},
+      },
     ]);
   };
 
-  const handleResetDevice = () => {
+  const handleResetMenuPress = () => {
     handleMenuClose();
+    if (allFeeders.length === 0) {
+      Alert.alert("Error", "No devices found to reset.");
+      return;
+    }
+    if (allFeeders.length > 1) {
+      setIsResetSelectionVisible(true);
+    } else {
+      confirmResetDevice(allFeeders[0].id);
+    }
+  };
+
+  const confirmResetDevice = (targetFeederId: string) => {
+    setIsResetSelectionVisible(false);
     Alert.alert(
       "Reset Device",
-      "This will erase the feeder from your account and send a reset command to the device. Are you sure you want to proceed?",
+      "This will erase the feeder from your account and send a reset command to the device. You will NOT be logged out. Are you sure you want to proceed?",
       [
         { text: "Cancel", style: "cancel" },
         {
           text: "Reset",
           style: "destructive",
-          onPress: async () => {
-            if (!feederId || !user) {
-              Alert.alert("Error", "Feeder or user not identified. Cannot reset.");
-              return;
-            }
-            try {
-              const rtdb = getDatabase();
-              const commandPath = `commands/${feederId}`;
-              await set(ref(rtdb, commandPath), {
-                command: "reset_device",
-                timestamp: rtdbServerTimestamp(),
-              });
-
-              const feederDocRef = doc(db, 'feeders', feederId);
-              await deleteDoc(feederDocRef);
-
-              await signOut(auth);
-              router.replace("/login");
-
-              Alert.alert("Success", "Device has been reset and removed from your account.");
-
-            } catch (error) {
-              console.error("Error resetting device:", error);
-              Alert.alert("Error", "Could not complete the reset process. Please try again.");
-            }
-          },
+          onPress: () => performResetDevice(targetFeederId),
         },
       ]
     );
   };
 
+  const performResetDevice = async (targetFeederId: string) => {
+    if (!targetFeederId || !user) {
+      Alert.alert("Error", "Feeder or user not identified. Cannot reset.");
+      return;
+    }
+    try {
+      const rtdb = getDatabase();
+      const commandPath = `commands/${targetFeederId}`;
+      await set(ref(rtdb, commandPath), {
+        command: "reset_device",
+        timestamp: rtdbServerTimestamp(),
+      });
+
+      const feederDocRef = doc(db, 'feeders', targetFeederId);
+      await deleteDoc(feederDocRef);
+
+      if (refreshUserData) {
+        await refreshUserData(); 
+      }
+      setRefreshTrigger(prev => prev + 1);
+      Alert.alert("Success", "Device has been reset and removed from your account.");
+
+    } catch (error) {
+      console.error("Error resetting device:", error);
+      Alert.alert("Error", "Could not complete the reset process. Please try again.");
+    }
+  };
+
   const handleAccountPress = () => {
     router.push("/account/account");
     handleMenuClose();
+  };
+
+  const handleManualPress = () => {
+    handleMenuClose();
+    router.push("/manual");
   };
 
   const toggleFilter = (bowl: 'bowl1' | 'bowl2') => {
@@ -375,26 +474,52 @@ export default function DashboardScreen() {
 
 
   const handleOpenFeedModal = (bowlNumber: number) => {
+    if (!isFeederOnline) {
+        Alert.alert("Feeder Offline", "Cannot dispense food while the feeder is offline.");
+        return;
+    }
+    if (!assignedPetsByBowl[bowlNumber]) {
+         Alert.alert("No Pet Assigned", "Please schedule a pet to this bowl before using Feed Now.");
+         return;
+    }
+
+    const status = bowlStatuses[bowlNumber];
+    if (status?.isWaiting && status.amount) {
+        const petName = pets.find(p => p.id === status.petId)?.name || 'your pet';
+        
+        Alert.alert(
+            "Pending Meal",
+            `This bowl is waiting for ${petName}. Do you want to feed the scheduled ${status.amount}g now?`,
+            [
+                { text: "Cancel", style: "cancel" },
+                { 
+                    text: "Feed Scheduled Amount", 
+                    onPress: () => handleDispenseFeed(status.amount!, bowlNumber)
+                }
+            ]
+        );
+        return;
+    }
+
     setSelectedBowlForAction(bowlNumber);
     setIsCustomFeedVisible(false);
     setCustomAmount('');
     setIsFeedModalVisible(true);
   };
 
-  const handleOpenFilterModal = (bowlNumber: number) => {
-    setSelectedBowlForAction(bowlNumber);
-    setIsFilterModalVisible(true);
-  };
+  const feedModalData = useMemo(() => {
+    if (selectedBowlForAction === null) return null;
+    const pet = assignedPetsByBowl[selectedBowlForAction];
+    if (!pet) return null;
+    const snackPortion = pet.snackPortion || 15; 
+    return { pet, snackPortion };
+  }, [selectedBowlForAction, assignedPetsByBowl]);
 
-  const handleSelectPetForFilter = (petId: string) => {
-      if (selectedBowlForAction) {
-          setSelectedPetInBowl(prev => ({ ...prev, [selectedBowlForAction]: petId }));
-      }
-      setIsFilterModalVisible(false);
-  };
 
-  const handleDispenseFeed = async (amount: number) => {
-    if (selectedBowlForAction === null || !amount || amount <= 0) {
+  const handleDispenseFeed = async (amount: number, explicitBowlNumber?: number) => {
+    const bowlToFeed = explicitBowlNumber ?? selectedBowlForAction;
+
+    if (bowlToFeed === null || !amount || amount <= 0) {
         Alert.alert('Invalid Amount', 'Please provide a valid portion amount.');
         return;
     }
@@ -405,8 +530,19 @@ export default function DashboardScreen() {
     try {
       const rtdb = getDatabase();
       const commandPath = `commands/${feederId}`;
-      await set(ref(rtdb, commandPath), { command: 'feed', bowl: selectedBowlForAction, amount, timestamp: rtdbServerTimestamp() });
-      Alert.alert('Success', `Dispensing ${amount}g from Bowl ${selectedBowlForAction}.`);
+      await set(ref(rtdb, commandPath), { command: 'feed', bowl: bowlToFeed, amount, timestamp: rtdbServerTimestamp() });
+      
+      const petName = assignedPetsByBowl[bowlToFeed]?.name || 'Manual Override';
+      
+      await addDoc(collection(db, 'feeders', feederId, 'history'), {
+           type: 'manual',
+           amount: amount,
+           bowlNumber: bowlToFeed,
+           petName: petName,
+           timestamp: firestoreServerTimestamp()
+      });
+
+      Alert.alert('Success', `Dispensing ${amount}g from Bowl ${bowlToFeed}.`);
     } catch (error) {
       console.error("Error sending feed command:", error);
       Alert.alert('Error', 'Could not send feed command.');
@@ -417,21 +553,6 @@ export default function DashboardScreen() {
     }
   };
 
-  const feedModalData = useMemo(() => {
-    if (selectedBowlForAction === null) return null;
-    const petId = selectedPetInBowl[selectedBowlForAction];
-    if (!petId) return null;
-
-    const pet = pets.find(p => p.id === petId);
-    if (!pet) return null;
-
-    const activeScheduleCount = activeSchedulesByPetId[pet.id] || 0;
-    const perMealPortion = (pet.recommendedPortion && activeScheduleCount > 0) ? Math.round(pet.recommendedPortion / activeScheduleCount) : 0;
-
-    return { pet, perMealPortion };
-  }, [selectedBowlForAction, selectedPetInBowl, pets, activeSchedulesByPetId]);
-
-
   if (isLoading) {
     return <View style={styles.loadingContainer}><ActivityIndicator size="large" color={COLORS.primary} /></View>;
   }
@@ -441,20 +562,19 @@ export default function DashboardScreen() {
       <View style={styles.header}>
         <TouchableOpacity onPress={handleMenu}><MaterialCommunityIcons name="menu" size={28} color={COLORS.primary} /></TouchableOpacity>
         <Text style={styles.headerTitle}>PawFeeds</Text>
-        <View style={{ width: 28 }} />
+        <TouchableOpacity onPress={() => router.push('/logs')}>
+              <MaterialCommunityIcons name="history" size={28} color={COLORS.primary} />
+        </TouchableOpacity>
       </View>
       <ScrollView contentContainerStyle={styles.scrollContainer}>
         <View>
           <ScrollView horizontal pagingEnabled showsHorizontalScrollIndicator={false} onScroll={handleScroll} scrollEventThrottle={16} contentContainerStyle={styles.swiperContainer} decelerationRate="fast" snapToInterval={CARD_WIDTH + 20} snapToAlignment="start">
             {bowlsConfig.map((bowl, index) => {
-                const selectedPetId = selectedPetInBowl[bowl.id];
-                const selectedPet = pets.find(p => p.id === selectedPetId);
+                const selectedPet = assignedPetsByBowl[bowl.id];
                 const activeScheduleCount = selectedPet ? (activeSchedulesByPetId[selectedPet.id] || 0) : 0;
                 const perMealPortion = (selectedPet && selectedPet.recommendedPortion && activeScheduleCount > 0) ? Math.round(selectedPet.recommendedPortion / activeScheduleCount) : 0;
-                
                 const streamUri = streamUris[bowl.id] || null;
                 const foodLevel = foodLevels[bowl.id] ?? 0;
-                
                 return (
                     <BowlCard
                         key={bowl.id}
@@ -463,9 +583,10 @@ export default function DashboardScreen() {
                         foodLevel={foodLevel}
                         perMealPortion={perMealPortion}
                         onPressFeed={() => handleOpenFeedModal(bowl.id)}
-                        onPressFilter={() => handleOpenFilterModal(bowl.id)}
                         streamUri={streamUri}
                         isActive={index === activeIndex}
+                        isFeederOnline={isFeederOnline}
+                        bowlStatus={bowlStatuses[bowl.id]}
                     />
                 );
             })}
@@ -502,10 +623,39 @@ export default function DashboardScreen() {
           <View style={styles.menuContainer}>
             <Text style={styles.menuTitle}>Menu</Text>
             <TouchableOpacity style={styles.menuItem} onPress={handleAccountPress}><MaterialCommunityIcons name="account-circle-outline" size={24} color={COLORS.text} style={styles.menuIcon} /><Text style={styles.menuItemText}>Account</Text></TouchableOpacity>
-            <TouchableOpacity style={styles.menuItem} onPress={() => Alert.alert('Coming Soon', 'Device provisioning will be available in a future update.')}><MaterialCommunityIcons name="plus-box-outline" size={24} color={COLORS.text} style={styles.menuIcon} /><Text style={styles.menuItemText}>Add Device</Text></TouchableOpacity>
-            <TouchableOpacity style={styles.menuItem} onPress={handleResetDevice}><MaterialCommunityIcons name="restart" size={24} color={COLORS.text} style={styles.menuIcon} /><Text style={styles.menuItemText}>Reset Device</Text></TouchableOpacity>
-            <TouchableOpacity style={styles.menuItem} onPress={() => Alert.alert('Coming Soon', 'Manual and tutorials will be available here.')}><MaterialCommunityIcons name="book-open-outline" size={24} color={COLORS.text} style={styles.menuIcon} /><Text style={styles.menuItemText}>Manual</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.menuItem} onPress={() => { handleMenuClose(); router.push('/(provisioning)'); }}><MaterialCommunityIcons name="plus-box-outline" size={24} color={COLORS.text} style={styles.menuIcon} /><Text style={styles.menuItemText}>Add Device</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.menuItem} onPress={handleResetMenuPress}><MaterialCommunityIcons name="restart" size={24} color={COLORS.text} style={styles.menuIcon} /><Text style={styles.menuItemText}>Reset Device</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.menuItem} onPress={handleManualPress}><MaterialCommunityIcons name="book-open-outline" size={24} color={COLORS.text} style={styles.menuIcon} /><Text style={styles.menuItemText}>Manual</Text></TouchableOpacity>
             <TouchableOpacity style={styles.menuLogoutButton} onPress={handleLogout}><MaterialCommunityIcons name="logout" size={24} color={COLORS.danger} style={styles.menuIcon} /><Text style={styles.menuLogoutText}>Logout</Text></TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* Reset Device Selection Modal */}
+      <Modal animationType="fade" transparent={true} visible={isResetSelectionVisible} onRequestClose={() => setIsResetSelectionVisible(false)}>
+        <TouchableOpacity style={styles.modalOverlay} onPress={() => setIsResetSelectionVisible(false)} activeOpacity={1}>
+          <View style={styles.menuContainer}>
+            <Text style={styles.menuTitle}>Select Device to Reset</Text>
+            <Text style={styles.modalSubtitle}>Choose a device to remove from your account.</Text>
+            <FlatList 
+              data={allFeeders}
+              keyExtractor={(item) => item.id}
+              style={{ maxHeight: 300, width: '100%' }}
+              renderItem={({ item, index }) => (
+                <TouchableOpacity 
+                  style={styles.menuItem} 
+                  onPress={() => confirmResetDevice(item.id)}
+                >
+                  <MaterialCommunityIcons name="router-wireless" size={24} color={COLORS.primary} style={styles.menuIcon} />
+                  <Text style={styles.menuItemText} numberOfLines={1}>
+                    {item.name || `Feeder ${index + 1}`} <Text style={{fontSize: 12, color: '#999'}}>({item.id.slice(0, 5)}...)</Text>
+                  </Text>
+                </TouchableOpacity>
+              )}
+            />
+            <TouchableOpacity style={styles.cancelButton} onPress={() => setIsResetSelectionVisible(false)}>
+              <Text style={styles.cancelButtonText}>Cancel</Text>
+            </TouchableOpacity>
           </View>
         </TouchableOpacity>
       </Modal>
@@ -515,8 +665,8 @@ export default function DashboardScreen() {
         <TouchableOpacity style={styles.modalOverlay} onPress={() => setIsFeedModalVisible(false)} activeOpacity={1}>
             <TouchableOpacity activeOpacity={1} style={styles.selectionModalContent}>
                 <View style={{padding: 2, alignItems: 'center', width: '100%'}}>
-                <TouchableOpacity style={[styles.modalButton, !feedModalData?.perMealPortion && styles.disabledButton]} onPress={() => handleDispenseFeed(feedModalData?.perMealPortion || 0)} disabled={!feedModalData?.perMealPortion}>
-                    <Text style={styles.modalButtonText}>{`Dispense Meal (${feedModalData?.perMealPortion || 0}g)`}</Text>
+                <TouchableOpacity style={[styles.modalButton, !feedModalData?.snackPortion && styles.disabledButton]} onPress={() => handleDispenseFeed(feedModalData?.snackPortion || 0)} disabled={!feedModalData?.snackPortion}>
+                    <Text style={styles.modalButtonText}>{`Dispense Snack (${feedModalData?.snackPortion || 0}g)`}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.customFeedToggle} onPress={() => setIsCustomFeedVisible(!isCustomFeedVisible)}>
                     <Text style={styles.customFeedToggleText}>Custom Amount</Text>
@@ -535,24 +685,6 @@ export default function DashboardScreen() {
         </TouchableOpacity>
       </Modal>
 
-      {/* Pet Filter Modal */}
-      <Modal visible={isFilterModalVisible} transparent={true} animationType="fade" onRequestClose={() => setIsFilterModalVisible(false)}>
-        <TouchableOpacity style={styles.modalOverlay} onPress={() => setIsFilterModalVisible(false)} activeOpacity={1}>
-            <View style={styles.selectionModalContent}>
-                <Text style={styles.modalTitle}>Select Pet to View</Text>
-                <FlatList
-                    data={petsByBowl[selectedBowlForAction!] || []}
-                    keyExtractor={(item) => item.id}
-                    renderItem={({ item }) => (
-                        <TouchableOpacity style={styles.selectionItem} onPress={() => handleSelectPetForFilter(item.id)}>
-                            <Text style={styles.selectionItemText}>{item.name}</Text>
-                        </TouchableOpacity>
-                    )}
-                    ListEmptyComponent={<Text style={styles.emptyListText}>No pets scheduled for this bowl.</Text>}
-                />
-            </View>
-        </TouchableOpacity>
-      </Modal>
     </SafeAreaView>
   );
 }
@@ -568,18 +700,14 @@ const styles = StyleSheet.create({
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
   cardTitleContainer: { flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1, marginRight: 10 },
   cardTitle: { fontSize: 18, fontWeight: 'bold', color: COLORS.text, flexShrink: 1 },
-  onlineIndicator: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#4CAF50' },
+  onlineIndicator: { width: 10, height: 10, borderRadius: 5 },
   videoFeedPlaceholder: { height: 180, backgroundColor: '#000000', borderRadius: 12, justifyContent: 'center', alignItems: 'center', marginBottom: 12, overflow: 'hidden' },
   video: { ...StyleSheet.absoluteFillObject },
   videoOverlay: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.3)' },
   videoOverlayText: { color: COLORS.white, marginTop: 8 },
   videoFeedText: { color: '#999', fontWeight: '500' },
-  statusContainer: { marginBottom: 16 },
-  statusLabel: { fontSize: 14, color: '#666', marginBottom: 6 },
-  progressBarBackground: { height: 10, backgroundColor: COLORS.lightGray, borderRadius: 5 },
-  progressBarFill: { height: '100%', backgroundColor: COLORS.primary, borderRadius: 5 },
-  statusPercentage: { textAlign: 'right', fontSize: 12, color: '#666', marginTop: 4 },
-  feedButton: { backgroundColor: COLORS.accent, borderRadius: 12, paddingVertical: 14, alignItems: 'center' },
+  // statusContainer and related styles removed since they are no longer used
+  feedButton: { backgroundColor: COLORS.accent, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginTop: 12 },
   disabledButton: { backgroundColor: COLORS.lightGray },
   feedButtonText: { fontSize: 16, fontWeight: 'bold', color: COLORS.text },
   portionText: { textAlign: 'center', color: '#888', marginTop: 12, fontSize: 14, fontStyle: 'italic' },
@@ -617,8 +745,8 @@ const styles = StyleSheet.create({
   customFeedToggle: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', width: '100%', paddingVertical: 12, borderTopWidth: 1, borderBottomWidth: 1, borderColor: COLORS.lightGray, marginVertical: 12 },
   customFeedToggleText: { fontSize: 16, fontWeight: '600', color: COLORS.text },
   customFeedContainer: { width: '100%', alignItems: 'center' },
-  cancelButton: { backgroundColor: 'transparent' },
-  cancelButtonText: { color: COLORS.danger, fontWeight: '600' },
+  cancelButton: { backgroundColor: 'transparent', marginTop: 10, alignSelf: 'center', padding: 10 },
+  cancelButtonText: { color: COLORS.danger, fontWeight: '600', fontSize: 16 },
   unassignButton: { backgroundColor: COLORS.danger, borderWidth: 0},
   selectionModalContent: { backgroundColor: COLORS.white, borderRadius: 12, padding: 20, width: '85%', maxHeight: '60%' },
   selectionItem: { paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: COLORS.lightGray },
